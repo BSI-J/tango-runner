@@ -12,6 +12,8 @@ export interface FeedOptions {
   pollSeconds?: number;
   /** How often to re-check for /wait while in fallback mode. */
   probeSeconds?: number;
+  /** On start, wake for tasks already waiting for this agent. Default true. */
+  sweepOnStart?: boolean;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 
@@ -39,6 +41,7 @@ export class Feed {
   async run(signal: AbortSignal): Promise<void> {
     let backoff = 1000;
     let nextProbe = 0;
+    await this.sweepOnStart();
     while (!signal.aborted) {
       try {
         if (this.mode === "poll" && Date.now() >= nextProbe) {
@@ -96,21 +99,29 @@ export class Feed {
     }
   }
 
+  /**
+   * Wake events are acked once handled, even when the run failed (bad cwd,
+   * missing binary). So after a fix and a restart nothing would redeliver
+   * them; tasks still waiting for this agent are picked up here instead.
+   * Events /wait returns for the same task coalesce with these in the scheduler.
+   */
+  private async sweepOnStart(): Promise<void> {
+    if (this.o.sweepOnStart === false) return;
+    try {
+      const events = this.taskEvents(await this.o.client.listMyTasks());
+      if (events.length) {
+        log("info", this.o.agentName, `${events.length} task${events.length === 1 ? "" : "s"} already waiting for this agent`);
+        this.o.onEvents(events);
+      }
+    } catch (err) {
+      log("warn", this.o.agentName, `startup check for waiting tasks failed: ${(err as Error).message}`);
+    }
+  }
+
   /** Fallback: diff my task list and unread count against the last poll. */
   async pollOnce(): Promise<void> {
     const [tasks, hb] = await Promise.all([this.o.client.listMyTasks(), this.o.client.heartbeat()]);
-    const events: WakeEvent[] = [];
-    const live = new Set<string>();
-    for (const t of tasks) {
-      live.add(t.id);
-      const status = (t.status ?? "").toLowerCase();
-      const sig = `${t.updated_at ?? ""}|${status}`;
-      const prev = this.seenTasks.get(t.id);
-      this.seenTasks.set(t.id, sig);
-      if (!STARTABLE.has(status) || prev === sig) continue;
-      events.push(this.synth("task.assigned", t, prev === undefined ? "assigned to you" : "updated and waiting for you"));
-    }
-    for (const id of this.seenTasks.keys()) if (!live.has(id)) this.seenTasks.delete(id);
+    const events = this.taskEvents(tasks);
 
     const unread = hb.unread_messages ?? 0;
     if (unread > this.lastUnread) {
@@ -130,6 +141,23 @@ export class Feed {
     }
     this.lastUnread = unread;
     if (events.length) this.o.onEvents(events);
+  }
+
+  /** Startable tasks that are new or changed since the last look. */
+  private taskEvents(tasks: TaskRow[]): WakeEvent[] {
+    const events: WakeEvent[] = [];
+    const live = new Set<string>();
+    for (const t of tasks) {
+      live.add(t.id);
+      const status = (t.status ?? "").toLowerCase();
+      const sig = `${t.updated_at ?? ""}|${status}`;
+      const prev = this.seenTasks.get(t.id);
+      this.seenTasks.set(t.id, sig);
+      if (!STARTABLE.has(status) || prev === sig) continue;
+      events.push(this.synth("task.assigned", t, prev === undefined ? "assigned to you" : "updated and waiting for you"));
+    }
+    for (const id of this.seenTasks.keys()) if (!live.has(id)) this.seenTasks.delete(id);
+    return events;
   }
 
   private synth(type: string, t: TaskRow, what: string): WakeEvent {

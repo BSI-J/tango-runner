@@ -21,19 +21,21 @@ Tango ──(long-poll, ~1s)──► tango-runner ──spawns──► claude 
 3. Configure and start:
 
 ```bash
-npx tango-runner init --key tng_… --harness claude --cwd ~/code/my-repo
-npx tango-runner doctor
-npx tango-runner start
+npx tango-runner@latest init --key tng_… --harness claude --cwd ~/code/my-repo
+npx tango-runner@latest doctor
+npx tango-runner@latest start
 ```
 
-To run more agents, run `init` again with a different `--name`. One runner process serves all of them.
+Replace `~/code/my-repo` with a folder that exists; `init` refuses one that doesn't. To run more agents, run `init` again with a different `--name`. One runner process serves all of them, and `start` refuses to run a second one on the same config.
+
+**Updating.** Plain `npx tango-runner` keeps reusing the copy it downloaded first, so it never updates. Use `npx tango-runner@latest`, or `npm install -g tango-runner` and `npm update -g tango-runner`.
 
 ## Harnesses
 
 | `--harness` | What it runs | Session resume |
 |---|---|---|
 | `claude` | `claude -p <prompt> --output-format json --mcp-config <tango> --strict-mcp-config --permission-mode acceptEdits --allowedTools mcp__tango` | yes (`--resume`) |
-| `codex` | `codex exec --json -c mcp_servers.tango.url=… -c mcp_servers.tango.bearer_token_env_var=TANGO_WORKER_KEY --full-auto <prompt>` | yes (`codex exec resume`). Not yet tested against a real Codex install. |
+| `codex` | `codex exec --json -c mcp_servers.tango.url=… -c mcp_servers.tango.bearer_token_env_var=TANGO_WORKER_KEY -c sandbox_mode="workspace-write" -c approval_policy="never" <prompt>` | yes (`codex exec resume`). Tested with codex-cli 0.159. |
 | `command` | Any shell command. The prompt arrives on stdin. The env has `TANGO_WAKE_PROMPT`, `TANGO_WAKE_EVENTS` (JSON), `TANGO_WORKER_KEY`, `TANGO_MCP_URL` and `TANGO_URL`. | up to you |
 
 The key reaches the agent through the environment only, never argv or disk. The Claude MCP config file references `${TANGO_WORKER_KEY}`, and Claude Code expands it.
@@ -65,6 +67,7 @@ The key reaches the agent through the environment only, never argv or disk. The 
 }
 ```
 
+- **Codex sandbox.** By default Codex runs sandboxed to the agent's folder and never stops to ask for approval; commands the sandbox blocks fail instead. Setting `extra_args` replaces those defaults, so include your own sandbox settings. (Runner 0.1.0 passed `--full-auto`, which codex-cli 0.159 removed; every Codex run failed with `unexpected argument '--full-auto'`.)
 - **Permissions.** Headless runs can't ask you anything, so tools that aren't allowed are denied. Use `allowed_tools` to grant exactly what the agent needs (for example your test command). Avoid `bypassPermissions` unless the machine is disposable.
 - **`strict_mcp: true`** (the default) loads only the Tango server in runs. That way the agent can't accidentally act through a different Tango identity from your personal config. Set it to `false` to also load your usual MCP servers.
 - **`key_env`** can replace `key` if you'd rather keep the key in your environment or a secrets manager.
@@ -78,6 +81,8 @@ The key reaches the agent through the environment only, never argv or disk. The 
 - **Loop guard.** After 2 consecutive follow-ups triggered only by activity during the agent's own runs, the runner waits for fresh activity.
 - **At most 30 runs per hour per agent** (configurable).
 - **At-least-once delivery.** An event is acknowledged only after its run finishes. If the runner crashes, you get it again on restart.
+- **Waiting tasks are picked up on start.** An event is acknowledged even when its run fails (a missing binary, a bad `cwd`). So on start the runner also checks for tasks still assigned to the agent and not yet claimed, and wakes it for those. Fix the problem, restart, and nothing is lost.
+- **One runner per config.** `start` takes a lock (`config.json.lock`). A second `start` on the same config exits instead of running every task twice.
 - **Paused workers idle.** Pausing the worker in Tango stops wakes. Events queue until you unpause.
 - **Timeouts.** A run is killed after `timeout_minutes` (default 30).
 - **Stopping.** Ctrl-C stops taking new work and gives current runs 60s to finish. Press Ctrl-C again to kill them.
@@ -97,7 +102,7 @@ To keep it running under macOS launchd, create `~/Library/LaunchAgents/io.applay
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>io.applayer.tango-runner</string>
-  <key>ProgramArguments</key><array><string>/usr/local/bin/npx</string><string>tango-runner</string><string>start</string></array>
+  <key>ProgramArguments</key><array><string>/usr/local/bin/npx</string><string>tango-runner@latest</string><string>start</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>/tmp/tango-runner.log</string>
@@ -105,7 +110,7 @@ To keep it running under macOS launchd, create `~/Library/LaunchAgents/io.applay
 </dict></plist>
 ```
 
-Then load it with `launchctl load ~/Library/LaunchAgents/io.applayer.tango-runner.plist`. On Linux, use a systemd user unit with `ExecStart=npx tango-runner start` and `Restart=always`.
+Then load it with `launchctl load ~/Library/LaunchAgents/io.applayer.tango-runner.plist`. On Linux, use a systemd user unit with `ExecStart=npx tango-runner@latest start` and `Restart=always`.
 
 ## Server contract
 
@@ -113,6 +118,7 @@ The runner uses the Tango worker REST API with the `tng_` key:
 
 - `GET /api/public/workers/wait?timeout=25&cursor=` long-polls for wake events and returns `{events, cursor, paused?}`.
 - `POST /api/public/workers/wait/ack {cursor}` acknowledges events.
+- `GET /api/public/workers/list_tasks?mine=1` once on start, for tasks still waiting.
 - Fallback when `/wait` returns 404: `GET /api/public/workers/list_tasks?mine=1` plus `POST /api/public/workers/heartbeat` (for `unread_messages`).
 
 Event objects look like `{id, type, created_at, task_id, thread_id, message_id, actor: {kind, id, handle, is_self}, title, summary, payload}`; see `src/types.ts`.

@@ -5,6 +5,7 @@ import { parseArgs } from "node:util";
 import { AgentRunner } from "./agent.js";
 import { HttpError, RUNNER_VERSION, TangoClient } from "./client.js";
 import { DEFAULT_URL, defaultConfigPath, expandHome, loadConfig, resolveKey, saveConfig, validateConfig } from "./config.js";
+import { acquireLock, lockHolder } from "./lock.js";
 import { log, redact, setVerbose } from "./log.js";
 import type { AgentConfig, Harness, RunnerConfig } from "./types.js";
 
@@ -72,10 +73,15 @@ function init(configPath: string, v: Record<string, string | boolean | undefined
     process.stderr.write("init: --cwd <dir> is required (the repo the agent should work in)\n");
     return 1;
   }
+  const cwd = expandHome(v.cwd as string);
+  if (!existsSync(cwd)) {
+    process.stderr.write(`init: --cwd ${cwd} does not exist. Point it at the repo the agent should work in.\n`);
+    return 1;
+  }
   const agent: AgentConfig = {
     name: (v.name as string) ?? harness,
     harness,
-    cwd: expandHome(v.cwd as string),
+    cwd,
     ...(v["key-env"] ? { key_env: v["key-env"] as string } : { key: v.key as string }),
     ...(v.command ? { command: v.command as string } : {}),
     ...(v.bin ? { bin: v.bin as string } : {}),
@@ -108,6 +114,7 @@ async function start(configPath: string, only?: string): Promise<number> {
     process.stderr.write(`No agent named "${only}" in ${configPath}\n`);
     return 1;
   }
+  acquireLock(configPath);
   const runners = agents.map((a) => new AgentRunner(cfg, a));
   log("info", "runner", `tango-runner ${RUNNER_VERSION} → ${cfg.tango_url}, ${runners.length} agent(s): ${runners.map((r) => r.name).join(", ")}`);
 
@@ -133,35 +140,48 @@ async function start(configPath: string, only?: string): Promise<number> {
 async function doctor(configPath: string): Promise<number> {
   let ok = true;
   const cfg = loadConfig(configPath);
-  process.stdout.write(`config: ${configPath}\ntango:  ${cfg.tango_url}\n\n`);
+  process.stdout.write(`config: ${configPath}\ntango:  ${cfg.tango_url}\n`);
+  const holder = lockHolder(configPath);
+  process.stdout.write(holder ? `runner: running (pid ${holder})\n\n` : "runner: not running\n\n");
   for (const a of cfg.agents) {
     process.stdout.write(`agent "${a.name}" (${a.harness}, cwd ${a.cwd})\n`);
     const key = resolveKey(a);
     const client = new TangoClient(cfg.tango_url, key, { host: "doctor", harness: a.harness });
+    let keyOk = true;
     try {
       const hb = await client.heartbeat();
       process.stdout.write(`  ✓ key ${redact(key)} works (worker ${hb.worker_id ?? "?"})\n`);
     } catch (e) {
-      ok = false;
+      ok = keyOk = false;
       process.stdout.write(`  ✗ key ${redact(key)}: ${(e as Error).message}\n`);
-      continue;
     }
-    try {
-      await client.wait(null, 0);
-      process.stdout.write("  ✓ server supports instant wake (/wait)\n");
-    } catch (e) {
-      if (e instanceof HttpError && e.status === 404) {
-        process.stdout.write(`  • server has no /wait yet: runner will poll every ${cfg.poll_seconds ?? 20}s until it does\n`);
-      } else {
-        ok = false;
-        process.stdout.write(`  ✗ /wait: ${(e as Error).message}\n`);
+    if (keyOk) {
+      try {
+        await client.wait(null, 0);
+        process.stdout.write("  ✓ server supports instant wake (/wait)\n");
+      } catch (e) {
+        if (e instanceof HttpError && e.status === 404) {
+          process.stdout.write(`  • server has no /wait yet: runner will poll every ${cfg.poll_seconds ?? 20}s until it does\n`);
+        } else {
+          ok = false;
+          process.stdout.write(`  ✗ /wait: ${(e as Error).message}\n`);
+        }
       }
     }
     if (!existsSync(expandHome(a.cwd))) {
       ok = false;
       process.stdout.write(`  ✗ cwd does not exist\n`);
     }
-    if (a.harness !== "command") {
+    if (a.harness === "command") {
+      // The command runs through sh; check its program resolves the same way.
+      const prog = a.command!.trim().split(/\s+/)[0];
+      const r = spawnSync("sh", ["-c", 'command -v -- "$1"', "sh", prog.startsWith("~") ? expandHome(prog) : prog], { encoding: "utf8", cwd: existsSync(expandHome(a.cwd)) ? expandHome(a.cwd) : undefined });
+      if (r.status === 0) process.stdout.write(`  ✓ command ${r.stdout.trim()}\n`);
+      else {
+        ok = false;
+        process.stdout.write(`  ✗ can't find "${prog}" (the first word of "command"). Install it or use its full path.\n`);
+      }
+    } else {
       const bin = a.bin ?? a.harness;
       const r = spawnSync(bin, ["--version"], { encoding: "utf8" });
       if (r.status === 0) process.stdout.write(`  ✓ ${bin} ${r.stdout.trim().split("\n")[0]}\n`);

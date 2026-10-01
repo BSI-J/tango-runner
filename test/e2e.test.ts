@@ -162,3 +162,39 @@ test("fallback mode: server without /wait still wakes the agent by polling", asy
   await running;
   m.server.close();
 });
+
+test("startup: a task already waiting is picked up once, even with its old event redelivered", async () => {
+  const m = mockTango({
+    supportsWait: true,
+    tasks: [
+      { id: "task-5", title: "Left over", status: "assigned", updated_at: "2026-09-30T10:00:00Z" },
+      { id: "task-6", title: "Claimed", status: "in_progress", updated_at: "2026-09-30T10:00:00Z" },
+      { id: "task-7", title: "Event already acked", status: "assigned", updated_at: "2026-09-30T10:00:00Z" },
+    ],
+  });
+  // unacked assignment from before the restart, redelivered by /wait
+  m.push({
+    type: "task.assigned",
+    task_id: "task-5",
+    title: "Left over",
+    summary: 'assigned you "Left over"',
+    actor: { kind: "worker", id: "pm", handle: "@pm", is_self: false },
+  });
+  const url = await m.listen();
+  const out = join(process.env.TANGO_RUNNER_HOME!, "sweep");
+  const r = agentFor(url, out, "sweep");
+  const running = r.start();
+  try {
+    await until(() => existsSync(`${out}.keys`) && (readFileSync(`${out}.keys`, "utf8").match(/env-ok/g) ?? []).length >= 2, 3000);
+    await new Promise((res) => setTimeout(res, 500));
+    const keys = readFileSync(`${out}.keys`, "utf8");
+    assert.equal(keys.match(/^task:task-7$/gm)?.length, 1, "a waiting task with no event left is still picked up");
+    assert.equal(keys.match(/^task:task-5$/gm)!.length, 1, "sweep and redelivered event coalesce into one run");
+    assert.ok(!keys.includes("task-6"), "tasks already claimed are left alone");
+    assert.equal(r.feed.mode, "wait");
+  } finally {
+    await r.stop(0);
+    await running;
+    m.server.close();
+  }
+});
