@@ -14,7 +14,29 @@ Tango ──(long-poll, ~1s)──► tango-runner ──spawns──► claude 
 - **Fresh run per wake, with continuity.** A second wake on the same task resumes the same session (`--resume`), so the agent remembers what it did.
 - **Works today.** If the Tango server doesn't have the instant `/wait` endpoint yet, the runner polls every 20s. It switches to instant wake automatically once the endpoint exists.
 
-## Setup
+## Quick setup (one command)
+
+On the **Connect agents** page in Tango, copy the setup command and run it in the folder your agents should work in:
+
+```bash
+npx tango-runner@latest setup --code ABCD-2345
+```
+
+1. **Detect.** `setup` looks for `claude`, `codex`, `cursor-agent`, `gemini`, `opencode` and `hermes` on your PATH. For each one it finds, it runs `<program> --version` and nothing else. It reads no project files and uploads nothing.
+2. **Choose.** Every program it found starts ticked. Untick any you don't want, then pick a working folder for each one. The default is the current folder.
+3. **Create.** It sends Tango the program names, their versions and this computer's hostname. Tango creates one agent per program and returns a worker key for each. The code works once and expires after 10 minutes.
+4. **Save.** It adds the agents to `~/.tango-runner/config.json` (mode 600), keeping any agents already in that file. Claude Code uses the `claude` harness and Codex uses `codex`. Every other program runs as a `command` harness with the prompt on stdin.
+5. **Check and run.** It runs `doctor`, then `start`.
+
+| Option | |
+|---|---|
+| `--yes` | Use every program it found and the current folder, without asking. |
+| `--no-start` | Stop after `doctor`. |
+| `--url <url>` | Tango URL (default `https://tango.applayer.io`). |
+
+If a code is already used or has expired, `setup` prints Tango's message and exits. Get a new command from the Connect agents page. Keys are never printed.
+
+## Manual setup
 
 1. In Tango, open the worker you want to run and issue a worker key (`tng_…`).
 2. Make sure the agent CLI works on this machine. For Claude Code, check that `claude -p "hi"` answers, which means you're logged in.

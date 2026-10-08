@@ -1,6 +1,6 @@
 import type { WakeEvent } from "./types.js";
 
-export const RUNNER_VERSION = "0.1.1";
+export const RUNNER_VERSION = "0.2.0";
 
 export class HttpError extends Error {
   constructor(

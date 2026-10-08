@@ -26,7 +26,10 @@ export function execRun(
   log.write(`# ${new Date().toISOString()} cwd=${opts.cwd}\n# $ ${shown}\n`);
 
   return new Promise((resolve) => {
-    const child = spawn(spec.shell ? "sh" : spec.cmd, spec.shell ? ["-c", spec.cmd] : spec.args, {
+    // Windows has no sh; let Node use cmd.exe for shell commands there.
+    const winShell = spec.shell && process.platform === "win32";
+    const child = spawn(spec.shell && !winShell ? "sh" : spec.cmd, spec.shell && !winShell ? ["-c", spec.cmd] : spec.args, {
+      shell: winShell,
       cwd: opts.cwd,
       env: { ...process.env, ...spec.env },
       stdio: ["pipe", "pipe", "pipe"],

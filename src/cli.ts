@@ -1,21 +1,44 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { hostname } from "node:os";
 import { parseArgs } from "node:util";
 import { AgentRunner } from "./agent.js";
 import { HttpError, RUNNER_VERSION, TangoClient } from "./client.js";
 import { DEFAULT_URL, defaultConfigPath, expandHome, loadConfig, resolveKey, saveConfig, validateConfig } from "./config.js";
 import { acquireLock, lockHolder } from "./lock.js";
 import { log, redact, setVerbose } from "./log.js";
+import {
+  agentName,
+  appendAgents,
+  chooseFolder,
+  choosePrograms,
+  detectPrograms,
+  matchAgents,
+  normalizeCode,
+  Prompter,
+  readExistingConfig,
+  register,
+  sameOrigin,
+  SetupError,
+  type Selection,
+} from "./setup.js";
 import type { AgentConfig, Harness, RunnerConfig } from "./types.js";
 
 const HELP = `tango-runner ${RUNNER_VERSION}: wake your local agents the moment Tango has work for them.
 
 Usage:
+  tango-runner setup --code ABCD-2345 [--url <url>] [--yes] [--no-start]
   tango-runner init --key tng_... --harness claude|codex|command --cwd <dir> [options]
   tango-runner start [--agent <name>] [--verbose]
   tango-runner doctor
   tango-runner help
+
+setup: detects installed agent CLIs (claude, codex, cursor-agent, gemini, opencode,
+hermes), creates them as agents in Tango with the one-time code from the Connect
+agents page, saves their keys to the config, then runs doctor and start.
+  --yes                 Use every detected program and the current folder; ask nothing.
+  --no-start            Stop after doctor.
 
 init options:
   --name <label>        Agent label (default: harness name). Re-running init with the same name replaces it.
@@ -45,6 +68,9 @@ async function main(): Promise<number> {
       model: { type: "string" },
       lite: { type: "boolean" },
       url: { type: "string" },
+      code: { type: "string" },
+      yes: { type: "boolean", short: "y" },
+      "no-start": { type: "boolean" },
       agent: { type: "string" },
       verbose: { type: "boolean", short: "v" },
       help: { type: "boolean", short: "h" },
@@ -55,6 +81,8 @@ async function main(): Promise<number> {
   const configPath = values.config ? expandHome(values.config) : defaultConfigPath();
 
   switch (cmd) {
+    case "setup":
+      return setup(configPath, values);
     case "init":
       return init(configPath, values);
     case "start":
@@ -105,6 +133,92 @@ function init(configPath: string, v: Record<string, string | boolean | undefined
   saveConfig(cfg, configPath);
   process.stdout.write(`Saved agent "${agent.name}" to ${configPath} (mode 600).\nNext: tango-runner doctor, then tango-runner start\n`);
   return 0;
+}
+
+async function setup(configPath: string, v: Record<string, string | boolean | undefined>): Promise<number> {
+  const fail = (msg: string) => (process.stderr.write(`setup: ${msg}\n`), 1);
+  if (!v.code) return fail("--code is required. Copy the full command from the Connect agents page in Tango.");
+  const code = normalizeCode(v.code as string);
+  if (!code) return fail("that code doesn't look right. Codes look like ABCD-2345 (no 0, O, 1 or I).");
+  const url = ((v.url as string | undefined) ?? DEFAULT_URL).replace(/\/+$/, "");
+
+  let existing;
+  try {
+    existing = readExistingConfig(configPath);
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+  // One tango_url per config: don't spend the code if the new agents can't share it.
+  if (existing && existing.agents.length && existing.tango_url && !sameOrigin(existing.tango_url, url)) {
+    return fail(`${configPath} already has agents for ${existing.tango_url}, not ${url}. Use --config <other file> for a second Tango.`);
+  }
+
+  const found = detectPrograms();
+  if (found.length === 0) {
+    process.stderr.write(
+      "setup: no agent CLI found on PATH (looked for claude, codex, cursor-agent, gemini, opencode, hermes).\n" +
+        "Install one and run this again, or connect any CLI by hand: create an agent in Tango, issue a worker key, then\n" +
+        "  tango-runner init --key tng_... --harness command --command \"<your cli>\" --cwd <dir>\n",
+    );
+    return 1;
+  }
+
+  const here = process.cwd();
+  const host = hostname();
+  let selections: Selection[];
+  if (v.yes) {
+    selections = found.map((f) => ({ ...f, cwd: here, name: agentName(f.program, host) }));
+    process.stdout.write(`Found ${found.map((f) => f.program).join(", ")}. Using ${here} for each.\n`);
+  } else {
+    process.stdout.write(`Found ${found.length} agent program(s) on this computer:\n`);
+    const p = new Prompter();
+    try {
+      const chosen = await choosePrograms(found, p);
+      if (chosen.length === 0) return fail("nothing selected; no agents created. The code is still unused.");
+      selections = [];
+      for (const f of chosen) selections.push({ ...f, cwd: await chooseFolder(f.program, here, p), name: agentName(f.program, host) });
+    } finally {
+      p.close();
+    }
+  }
+
+  let res;
+  try {
+    res = await register(url, {
+      code,
+      host,
+      runner_version: RUNNER_VERSION,
+      agents: selections.map((s) => ({ program: s.program, ...(s.version ? { version: s.version } : {}), name: s.name })),
+    });
+  } catch (e) {
+    return fail(e instanceof SetupError ? e.message : `could not register agents: ${(e as Error).message}`);
+  }
+
+  const { entries, skipped } = matchAgents(res.agents, selections);
+  if (entries.length === 0) {
+    return fail(`Tango returned no usable keys${skipped.length ? ` (skipped: ${skipped.join(", ")})` : ""}. Get a fresh setup command from the Connect agents page in Tango.`);
+  }
+  const added = appendAgents(configPath, existing, res.api_base, entries);
+  process.stdout.write(`\nCreated ${added.length} agent(s) in Tango and saved them to ${configPath} (mode 600):\n`);
+  for (const a of added) process.stdout.write(`  ✓ ${a.name}  (${a.harness === "command" ? `command: ${a.command}` : a.harness}, cwd ${a.cwd})\n`);
+  if (skipped.length) process.stdout.write(`  Skipped (Tango returned no key): ${skipped.join(", ")}\n`);
+
+  process.stdout.write("\nRunning doctor…\n");
+  if ((await doctor(configPath)) !== 0) {
+    process.stderr.write("\nsetup: the agents are saved, but doctor found a problem (above). Fix it, then run: tango-runner start\n");
+    return 1;
+  }
+  if (v["no-start"]) {
+    process.stdout.write("\nDone. Start the runner with: tango-runner start\n");
+    return 0;
+  }
+  const holder = lockHolder(configPath);
+  if (holder) {
+    process.stdout.write(`\nA runner is already running for this config (pid ${holder}). Restart it to pick up the new agents.\n`);
+    return 0;
+  }
+  process.stdout.write("\nStarting the runner (Ctrl-C to stop)…\n");
+  return start(configPath);
 }
 
 async function start(configPath: string, only?: string): Promise<number> {
@@ -175,15 +289,24 @@ async function doctor(configPath: string): Promise<number> {
     if (a.harness === "command") {
       // The command runs through sh; check its program resolves the same way.
       const prog = a.command!.trim().split(/\s+/)[0];
-      const r = spawnSync("sh", ["-c", 'command -v -- "$1"', "sh", prog.startsWith("~") ? expandHome(prog) : prog], { encoding: "utf8", cwd: existsSync(expandHome(a.cwd)) ? expandHome(a.cwd) : undefined });
-      if (r.status === 0) process.stdout.write(`  ✓ command ${r.stdout.trim()}\n`);
+      const target = prog.startsWith("~") ? expandHome(prog) : prog;
+      const cwd = existsSync(expandHome(a.cwd)) ? expandHome(a.cwd) : undefined;
+      const r =
+        process.platform === "win32"
+          ? spawnSync("where", [target], { encoding: "utf8", cwd, windowsHide: true })
+          : spawnSync("sh", ["-c", 'command -v -- "$1"', "sh", target], { encoding: "utf8", cwd });
+      if (r.status === 0) process.stdout.write(`  ✓ command ${r.stdout.trim().split(/\r?\n/)[0]}\n`);
       else {
         ok = false;
         process.stdout.write(`  ✗ can't find "${prog}" (the first word of "command"). Install it or use its full path.\n`);
       }
     } else {
       const bin = a.bin ?? a.harness;
-      const r = spawnSync(bin, ["--version"], { encoding: "utf8" });
+      // npm installs .cmd shims on Windows, which only run through the shell.
+      const r =
+        process.platform === "win32"
+          ? spawnSync(`"${bin}" --version`, { encoding: "utf8", shell: true, windowsHide: true })
+          : spawnSync(bin, ["--version"], { encoding: "utf8" });
       if (r.status === 0) process.stdout.write(`  ✓ ${bin} ${r.stdout.trim().split("\n")[0]}\n`);
       else {
         ok = false;
