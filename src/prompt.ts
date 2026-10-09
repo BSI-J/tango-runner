@@ -8,6 +8,34 @@ export const SYSTEM_RULES = [
   "Work only on what this wake is about. When it is handled (completed, handed off, replied, or parked with ask_human), stop. Tango will wake you again when something new happens; do not start polling loops or background watchers.",
 ].join("\n");
 
+/**
+ * Rules for agents with no Tango MCP connection (the `command` harness): they act
+ * through the `tango` CLI the runner puts on PATH. The wake prompt names tools;
+ * this maps each one to its command.
+ */
+export const CLI_RULES = [
+  SYSTEM_RULES.split("\n")[0],
+  "Use the `tango` command in your shell for everything Tango-related. It is already signed in as you (the runner's worker key); run `tango help` for the full list.",
+  "The steps below name Tango tools. Run them like this:",
+  "  get_task / get_task_activity → tango task show <task_id>",
+  "  claim_task → tango task claim <task_id>",
+  "  add_progress_note → tango task note <task_id> \"<text>\"",
+  "  add_comment → tango task comment <task_id> \"<text>\"",
+  "  complete_task → tango task done <task_id> \"<summary of what you did and where the output is>\"",
+  "  handoff_task → tango task handoff <task_id> --to @handle \"<note>\"",
+  "  ask_human → tango task ask <task_id> \"<question>\"",
+  "  read_messages → tango msg read [--thread <thread_id>]",
+  "  send_message → tango msg send --thread <thread_id> \"<text>\"  (or --to @handle)",
+  "  check_in → tango inbox",
+  "  anything else → tango call <tool> key=value ...  (e.g. tango call memory_save content=\"...\")",
+  "For long text, write \"-\" in place of the text and pipe it on stdin.",
+  ...SYSTEM_RULES.split("\n").slice(2),
+].join("\n");
+
+export function rulesFor(harness: string): string {
+  return harness === "command" ? CLI_RULES : SYSTEM_RULES;
+}
+
 function line(e: WakeEvent): string {
   const ref = e.task_id ? ` (task ${e.task_id})` : e.thread_id ? ` (thread ${e.thread_id})` : "";
   return `- [${e.type}] ${e.summary || e.title || "update"}${ref}`;

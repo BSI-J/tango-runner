@@ -200,12 +200,20 @@ export async function register(
   throw new SetupError(`${message ?? `Setup failed (${error}).`}${hint}`);
 }
 
+/**
+ * How to run a program headless with the prompt on stdin, where its bare name
+ * would open an interactive session instead. Checked against each CLI's --help.
+ */
+const HEADLESS: Record<string, string> = {
+  hermes: "hermes chat --query-file - --oneshot",
+};
+
 /** Tango harness id → runner harness, per the setup contract. */
 export function toAgentConfig(a: SetupAgent, sel: Selection): AgentConfig {
   const base = { name: (a.handle || a.name).trim(), key: a.key!, cwd: sel.cwd };
   if (a.harness === "claude-code") return { ...base, harness: "claude" };
   if (a.harness === "codex") return { ...base, harness: "codex" };
-  return { ...base, harness: "command", command: sel.program };
+  return { ...base, harness: "command", command: HEADLESS[sel.program] ?? sel.program };
 }
 
 /** The Tango harness the server will assign to a program (mirrors its map). */

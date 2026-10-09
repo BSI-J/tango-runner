@@ -105,6 +105,8 @@ test("matchAgents pairs by name, then by harness, and reports keyless agents", (
     { name: "c", key: "tng_bbbbbbbbbbbbbbbb", cwd: "/w", harness: "claude" },
   ]);
   assert.deepEqual(skipped, ["g", "hermes"]);
+  const h = matchAgents([{ worker_id: "4", handle: "h", name: "hermes on h", harness: "hermes", key: "tng_cccccccccccccccc" }], [sel("hermes")]);
+  assert.equal(h.entries[0].command, "hermes chat --query-file - --oneshot");
 });
 
 test("setup --yes registers detected programs and appends a 0600 config", { skip: !posix }, async () => {

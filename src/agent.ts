@@ -7,7 +7,7 @@ import { expandHome, resolveKey, stateDir } from "./config.js";
 import { execRun } from "./exec.js";
 import { Feed } from "./feed.js";
 import { log } from "./log.js";
-import { buildPrompt, SYSTEM_RULES } from "./prompt.js";
+import { buildPrompt, rulesFor } from "./prompt.js";
 import { Scheduler } from "./scheduler.js";
 import { SessionStore } from "./state.js";
 import type { AgentConfig, RunnerConfig, WakeEvent } from "./types.js";
@@ -97,7 +97,7 @@ export class AgentRunner {
       tangoUrl: this.cfg.tango_url,
       key: this.key,
       prompt: buildPrompt(events, !!sessionId),
-      systemRules: SYSTEM_RULES,
+      systemRules: rulesFor(a.harness),
       sessionId,
       eventsJson: JSON.stringify(events),
       wakeKey: key,
