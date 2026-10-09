@@ -3,7 +3,8 @@
 // Detection only resolves binaries and runs `--version`; no project files are read.
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { extname } from "node:path";
+import { homedir } from "node:os";
+import { extname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { RUNNER_VERSION } from "./client.js";
 import { expandHome, saveConfig, validateConfig } from "./config.js";
@@ -15,8 +16,10 @@ export const PROGRAMS = ["claude", "codex", "cursor-agent", "gemini", "opencode"
 export interface Detected {
   /** Program id sent to Tango (also the binary name). */
   program: string;
-  /** Resolved path, for display only. */
+  /** Resolved path. */
   path: string;
+  /** How to invoke it in a command: the bare name when it's on PATH, else the full path. */
+  bin: string;
   /** First line of `<bin> --version`, or "" if it printed nothing. */
   version: string;
 }
@@ -67,11 +70,22 @@ export function programVersion(path: string): string {
   return line.slice(0, 60);
 }
 
+/**
+ * CLIs that desktop apps bundle without putting them on PATH. Checked only when
+ * the program isn't on PATH; only the path's existence is checked.
+ */
+export const BUNDLED: Record<string, Partial<Record<NodeJS.Platform, string[]>>> = {
+  opencode: { darwin: ["/Applications/OpenCode.app/Contents/Resources/opencode-cli", join(homedir(), "Applications/OpenCode.app/Contents/Resources/opencode-cli")] },
+};
+
 export function detectPrograms(programs: readonly string[] = PROGRAMS): Detected[] {
   const found: Detected[] = [];
   for (const program of programs) {
-    const path = resolveBinary(program);
-    if (path) found.push({ program, path, version: programVersion(path) });
+    const onPath = resolveBinary(program);
+    // TANGO_RUNNER_NO_BUNDLED=1 limits detection to PATH (tests, or to skip app copies).
+    const bundled = process.env.TANGO_RUNNER_NO_BUNDLED === "1" ? undefined : BUNDLED[program]?.[process.platform];
+    const path = onPath ?? bundled?.find((p) => existsSync(p)) ?? null;
+    if (path) found.push({ program, path, bin: onPath ? program : path, version: programVersion(path) });
   }
   return found;
 }
@@ -204,8 +218,10 @@ export async function register(
  * How to run a program headless with the prompt on stdin, where its bare name
  * would open an interactive session instead. Checked against each CLI's --help.
  */
-const HEADLESS: Record<string, string> = {
-  hermes: "hermes chat --query-file - --oneshot",
+const HEADLESS: Record<string, (bin: string) => string> = {
+  hermes: (bin) => `${bin} chat --query-file - --oneshot`,
+  // --auto: approve tool use (a woken agent can't answer prompts); --standalone: don't need the desktop app's service.
+  opencode: (bin) => `${bin} run --standalone --auto`,
 };
 
 /** Tango harness id → runner harness, per the setup contract. */
@@ -213,7 +229,7 @@ export function toAgentConfig(a: SetupAgent, sel: Selection): AgentConfig {
   const base = { name: (a.handle || a.name).trim(), key: a.key!, cwd: sel.cwd };
   if (a.harness === "claude-code") return { ...base, harness: "claude" };
   if (a.harness === "codex") return { ...base, harness: "codex" };
-  return { ...base, harness: "command", command: HEADLESS[sel.program] ?? sel.program };
+  return { ...base, harness: "command", command: HEADLESS[sel.program]?.(sel.bin) ?? sel.bin };
 }
 
 /** The Tango harness the server will assign to a program (mirrors its map). */

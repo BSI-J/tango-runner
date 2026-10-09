@@ -61,7 +61,7 @@ function mockTango(reply: (body: Record<string, unknown>) => Reply, knownKeys: s
 
 function runCli(args: string[], env: Record<string, string>, cwd: string): Promise<{ code: number; out: string }> {
   return new Promise((resolve) => {
-    execFile(process.execPath, [CLI, ...args], { env: { ...env, HOME: cwd }, cwd, timeout: 20_000 }, (err, stdout, stderr) => {
+    execFile(process.execPath, [CLI, ...args], { env: { TANGO_RUNNER_NO_BUNDLED: "1", ...env, HOME: cwd }, cwd, timeout: 20_000 }, (err, stdout, stderr) => {
       resolve({ code: err ? ((err as { code?: number }).code ?? 1) : 0, out: stdout + stderr });
     });
   });
@@ -91,7 +91,7 @@ test("RUNNER_VERSION matches package.json", () => {
 });
 
 test("matchAgents pairs by name, then by harness, and reports keyless agents", () => {
-  const sel = (program: string): Selection => ({ program, path: `/bin/${program}`, version: "1", cwd: "/w", name: `${program} on h` });
+  const sel = (program: string, bin = program): Selection => ({ program, path: `/bin/${program}`, bin, version: "1", cwd: "/w", name: `${program} on h` });
   const { entries, skipped } = matchAgents(
     [
       { worker_id: "1", handle: null, name: "renamed", harness: "codex", key: "tng_aaaaaaaaaaaaaaaa" },
@@ -107,6 +107,9 @@ test("matchAgents pairs by name, then by harness, and reports keyless agents", (
   assert.deepEqual(skipped, ["g", "hermes"]);
   const h = matchAgents([{ worker_id: "4", handle: "h", name: "hermes on h", harness: "hermes", key: "tng_cccccccccccccccc" }], [sel("hermes")]);
   assert.equal(h.entries[0].command, "hermes chat --query-file - --oneshot");
+  const app = "/Applications/OpenCode.app/Contents/Resources/opencode-cli";
+  const o = matchAgents([{ worker_id: "5", handle: "o", name: "opencode on h", harness: "opencode", key: "tng_dddddddddddddddd" }], [sel("opencode", app)]);
+  assert.equal(o.entries[0].command, `${app} run --standalone --auto`);
 });
 
 test("setup --yes registers detected programs and appends a 0600 config", { skip: !posix }, async () => {

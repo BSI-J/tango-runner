@@ -1,6 +1,6 @@
 {
   "name": "tango-runner",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Wake your local AI agents (Claude Code, Codex, any CLI) the moment Tango has work for them, and give them a `tango` CLI to act with.",
   "license": "MIT",
   "type": "module",

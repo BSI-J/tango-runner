@@ -22,10 +22,10 @@ On the **Connect agents** page in Tango, copy the setup command and run it in th
 npx tango-runner@latest setup --code ABCD-2345
 ```
 
-1. **Detect.** `setup` looks for `claude`, `codex`, `cursor-agent`, `gemini`, `opencode` and `hermes` on your PATH. For each one it finds, it runs `<program> --version` and nothing else. It reads no project files and uploads nothing.
+1. **Detect.** `setup` looks for `claude`, `codex`, `cursor-agent`, `gemini`, `opencode` and `hermes` on your PATH. On macOS it also finds the `opencode` CLI bundled inside OpenCode.app. For each one it finds, it runs `<program> --version` and nothing else. It reads no project files and uploads nothing.
 2. **Choose.** Every program it found starts ticked. Untick any you don't want, then pick a working folder for each one. The default is the current folder.
 3. **Create.** It sends Tango the program names, their versions and this computer's hostname. Tango creates one agent per program and returns a worker key for each. The code works once and expires after 10 minutes.
-4. **Save.** It adds the agents to `~/.tango-runner/config.json` (mode 600), keeping any agents already in that file. Claude Code uses the `claude` harness and Codex uses `codex`. Every other program runs as a `command` harness with the prompt on stdin.
+4. **Save.** It adds the agents to `~/.tango-runner/config.json` (mode 600), keeping any agents already in that file. Claude Code uses the `claude` harness and Codex uses `codex`. Every other program runs as a `command` harness with the prompt on stdin: hermes as `hermes chat --query-file - --oneshot`, opencode as `opencode run --standalone --auto` (it uses OpenCode's default model, so set one that works), and the rest by name.
 5. **Check and run.** It runs `doctor`, then `start`.
 
 | Option | |
