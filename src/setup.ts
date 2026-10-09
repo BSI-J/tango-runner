@@ -233,6 +233,8 @@ const HEADLESS: Record<string, (bin: string) => string> = {
   opencode: (bin) => `${bin} run --standalone --auto`,
   // Interactive unless -p is given; -p's text is appended to the prompt on stdin.
   // yolo: approve tool use; --skip-trust: no workspace-trust prompt in a headless run.
+  // -p: print mode (reads the prompt on stdin); --force: run commands; --trust: no workspace prompt.
+  "cursor-agent": (bin) => `${bin} -p --trust --force`,
   // agy -p takes the prompt as its value and doesn't read stdin, so hand it stdin via $(cat).
   // The shell passes the text as one argument without re-evaluating it. POSIX shells only.
   agy: (bin) => `${bin} --dangerously-skip-permissions -p "$(cat)"`,

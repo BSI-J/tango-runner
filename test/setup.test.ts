@@ -107,6 +107,8 @@ test("matchAgents pairs by name, then by harness, and reports keyless agents", (
   assert.deepEqual(skipped, ["g", "hermes"]);
   const h = matchAgents([{ worker_id: "4", handle: "h", name: "hermes on h", harness: "hermes", key: "tng_cccccccccccccccc" }], [sel("hermes")]);
   assert.equal(h.entries[0].command, "hermes chat --query-file - --oneshot");
+  const c = matchAgents([{ worker_id: "7", handle: "c", name: "cursor-agent on h", harness: "cursor", key: "tng_ffffffffffffffff" }], [sel("cursor-agent")]);
+  assert.equal(c.entries[0].command, "cursor-agent -p --trust --force");
   const g = matchAgents([{ worker_id: "6", handle: "a", name: "agy on h", harness: "command", key: "tng_eeeeeeeeeeeeeeee" }], [sel("agy")]);
   assert.equal(g.entries[0].command, 'agy --dangerously-skip-permissions -p "$(cat)"');
   const app = "/Applications/OpenCode.app/Contents/Resources/opencode-cli";
