@@ -15,7 +15,9 @@ import {
   choosePrograms,
   detectPrograms,
   matchAgents,
+  MAX_AGENTS,
   normalizeCode,
+  PROGRAMS,
   Prompter,
   readExistingConfig,
   register,
@@ -156,7 +158,7 @@ async function setup(configPath: string, v: Record<string, string | boolean | un
   const found = detectPrograms();
   if (found.length === 0) {
     process.stderr.write(
-      "setup: no agent CLI found on PATH (looked for claude, codex, cursor-agent, gemini, opencode, hermes).\n" +
+      `setup: no agent CLI found on PATH (looked for ${PROGRAMS.join(", ")}).\n` +
         "Install one and run this again, or connect any CLI by hand: create an agent in Tango, issue a worker key, then\n" +
         "  tango-runner init --key tng_... --harness command --command \"<your cli>\" --cwd <dir>\n",
     );
@@ -167,7 +169,11 @@ async function setup(configPath: string, v: Record<string, string | boolean | un
   const host = hostname();
   let selections: Selection[];
   if (v.yes) {
-    selections = found.map((f) => ({ ...f, cwd: here, name: agentName(f.program, host) }));
+    const use = found.slice(0, MAX_AGENTS);
+    selections = use.map((f) => ({ ...f, cwd: here, name: agentName(f.program, host) }));
+    if (found.length > MAX_AGENTS) {
+      process.stdout.write(`Tango sets up at most ${MAX_AGENTS} agents at a time; skipping ${found.slice(MAX_AGENTS).map((f) => f.program).join(", ")}. Run setup without --yes to choose.\n`);
+    }
     process.stdout.write(`Found ${found.map((f) => f.program).join(", ")}. Using ${here} for each.\n`);
   } else {
     process.stdout.write(`Found ${found.length} agent program(s) on this computer:\n`);

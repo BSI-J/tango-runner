@@ -11,7 +11,10 @@ import { expandHome, saveConfig, validateConfig } from "./config.js";
 import type { AgentConfig, RunnerConfig } from "./types.js";
 
 /** Programs `setup` looks for, in display order. */
-export const PROGRAMS = ["claude", "codex", "cursor-agent", "gemini", "opencode", "hermes"] as const;
+export const PROGRAMS = ["claude", "codex", "cursor-agent", "agy", "gemini", "opencode", "hermes"] as const;
+
+/** Tango creates at most this many agents per setup code. */
+export const MAX_AGENTS = 6;
 
 export interface Detected {
   /** Program id sent to Tango (also the binary name). */
@@ -138,7 +141,13 @@ export async function choosePrograms(found: Detected[], p: Prompter): Promise<De
   for (;;) {
     found.forEach((f, i) => process.stdout.write(`  ${i + 1}. [${ticked[i] ? "x" : " "}] ${f.program.padEnd(width)}  ${f.version || f.path}\n`));
     const a = await p.ask("Type numbers to tick/untick (e.g. \"2 3\"), or press Enter to continue: ");
-    if (a === null || a.trim() === "") return found.filter((_, i) => ticked[i]);
+    const chosen = found.filter((_, i) => ticked[i]);
+    if (a === null) return chosen.slice(0, MAX_AGENTS);
+    if (a.trim() === "") {
+      if (chosen.length <= MAX_AGENTS) return chosen;
+      process.stdout.write(`  Tango sets up at most ${MAX_AGENTS} agents at a time; untick ${chosen.length - MAX_AGENTS}.\n`);
+      continue;
+    }
     for (const t of a.split(/[\s,]+/).filter(Boolean)) {
       const n = Number(t);
       if (Number.isInteger(n) && n >= 1 && n <= found.length) ticked[n - 1] = !ticked[n - 1];
@@ -222,6 +231,12 @@ const HEADLESS: Record<string, (bin: string) => string> = {
   hermes: (bin) => `${bin} chat --query-file - --oneshot`,
   // --auto: approve tool use (a woken agent can't answer prompts); --standalone: don't need the desktop app's service.
   opencode: (bin) => `${bin} run --standalone --auto`,
+  // Interactive unless -p is given; -p's text is appended to the prompt on stdin.
+  // yolo: approve tool use; --skip-trust: no workspace-trust prompt in a headless run.
+  // agy -p takes the prompt as its value and doesn't read stdin, so hand it stdin via $(cat).
+  // The shell passes the text as one argument without re-evaluating it. POSIX shells only.
+  agy: (bin) => `${bin} --dangerously-skip-permissions -p "$(cat)"`,
+  gemini: (bin) => `${bin} --skip-trust --approval-mode yolo -p 'Do what the instructions above say.'`,
 };
 
 /** Tango harness id → runner harness, per the setup contract. */
@@ -234,7 +249,7 @@ export function toAgentConfig(a: SetupAgent, sel: Selection): AgentConfig {
 
 /** The Tango harness the server will assign to a program (mirrors its map). */
 function expectedHarness(program: string): string {
-  const m: Record<string, string> = { claude: "claude-code", codex: "codex", "cursor-agent": "cursor", gemini: "gemini", opencode: "opencode", hermes: "hermes" };
+  const m: Record<string, string> = { agy: "command", claude: "claude-code", codex: "codex", "cursor-agent": "cursor", gemini: "gemini", opencode: "opencode", hermes: "hermes" };
   return m[program] ?? "command";
 }
 

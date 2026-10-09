@@ -107,6 +107,8 @@ test("matchAgents pairs by name, then by harness, and reports keyless agents", (
   assert.deepEqual(skipped, ["g", "hermes"]);
   const h = matchAgents([{ worker_id: "4", handle: "h", name: "hermes on h", harness: "hermes", key: "tng_cccccccccccccccc" }], [sel("hermes")]);
   assert.equal(h.entries[0].command, "hermes chat --query-file - --oneshot");
+  const g = matchAgents([{ worker_id: "6", handle: "a", name: "agy on h", harness: "command", key: "tng_eeeeeeeeeeeeeeee" }], [sel("agy")]);
+  assert.equal(g.entries[0].command, 'agy --dangerously-skip-permissions -p "$(cat)"');
   const app = "/Applications/OpenCode.app/Contents/Resources/opencode-cli";
   const o = matchAgents([{ worker_id: "5", handle: "o", name: "opencode on h", harness: "opencode", key: "tng_dddddddddddddddd" }], [sel("opencode", app)]);
   assert.equal(o.entries[0].command, `${app} run --standalone --auto`);
@@ -144,10 +146,21 @@ test("setup --yes registers detected programs and appends a 0600 config", { skip
   assert.deepEqual(cfg.agents, [
     prior.agents[0],
     { name: "claude-bot-2", key: keys.claude, cwd: work, harness: "claude" },
-    { name: "gemini-bot", key: keys.gemini, cwd: work, harness: "command", command: "gemini" },
+    { name: "gemini-bot", key: keys.gemini, cwd: work, harness: "command", command: "gemini --skip-trust --approval-mode yolo -p 'Do what the instructions above say.'" },
   ]);
   assert.match(r.out, /✓ key .* works/);
   for (const k of Object.values(keys)) assert.ok(!r.out.includes(k), "key leaked to output");
+});
+
+test("setup --yes sends at most 6 agents and says which it skipped", { skip: !posix }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "tango-runner-home-"));
+  const bins = fakeBins({ claude: "1", codex: "1", "cursor-agent": "1", agy: "1", gemini: "1", opencode: "1", hermes: "1" });
+  const tango = mockTango(okReply((p) => `tng_${p.replace(/\W/g, "")}_key_0123456789`));
+  const url = await tango.listen();
+  const r = await runCli(["setup", "--code", "ABCD-2345", "--url", url, "--yes", "--no-start", "--config", join(home, "c.json")], { PATH: `${bins}:/usr/bin:/bin` }, home);
+  tango.close();
+  assert.equal((tango.setupBodies[0]!.agents as unknown[]).length, 6);
+  assert.match(r.out, /at most 6 agents at a time; skipping hermes/);
 });
 
 test("setup reports agents that came back without a key", { skip: !posix }, async () => {
