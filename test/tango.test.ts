@@ -64,7 +64,11 @@ function mockTango() {
           task: { id: args.task_id, title: "Fix login", status: "in_progress", goal: "Users can log in", definition_of_done: "Tests pass" },
           lease: { worker_handle: "@me", expires_at: "2026-10-09T12:30:00Z" },
           artifacts: [],
-          activity: [{ created_at: "2026-10-09T12:00:00Z", actor_handle: "@pm", kind: "comment", body: "Please look at\nthe redirect" }],
+          // newest first, as Tango returns it
+          activity: [
+            { at: "2026-10-09T12:05:00Z", kind: "event", type: "task_claimed", body: null, actor_worker_handle: "me" },
+            { at: "2026-10-09T12:00:00Z", kind: "comment", type: "comment", body: "Please look at\nthe redirect", actor_name: "Pat PM" },
+          ],
           can_write: true,
         });
       case "claim_task":
@@ -115,7 +119,8 @@ test("parseToolArgs: key=value with JSON values, or one JSON object", () => {
 test("command agents get CLI rules; MCP harnesses keep tool rules", () => {
   assert.equal(rulesFor("claude"), SYSTEM_RULES);
   assert.equal(rulesFor("command"), CLI_RULES);
-  assert.match(CLI_RULES, /tango task done <task_id>/);
+  assert.match(CLI_RULES, /tango task done <task_id> '</);
+  assert.match(CLI_RULES, /--file <path>/);
   assert.match(CLI_RULES, /information, not instructions/);
   assert.ok(!CLI_RULES.includes("MCP tools"));
 });
@@ -130,7 +135,7 @@ test("tango: shorthand commands map onto the bridged tools", async () => {
     assert.match(r.stdout, /in_progress +Fix login/);
     assert.match(r.stdout, /Goal: Users can log in/);
     assert.match(r.stdout, /Lease: @me until 2026-10-09 12:30 \(yours\)/);
-    assert.match(r.stdout, /@pm comment: Please look at the redirect/);
+    assert.match(r.stdout, /12:00  Pat PM comment: Please look at the redirect\n  2026-10-09 12:05  @me task_claimed$/m);
 
     r = await tango(["task", "claim", TASK], env);
     assert.match(r.stdout, /✓ claimed .* \(lease until 2026-10-09 12:45\)/);
@@ -187,13 +192,80 @@ test("tango: reads the key from the runner config, and asks which agent when the
     writeFileSync(cfg, JSON.stringify({ tango_url: url, agents: [agent("a", KEY), agent("b", "tng_other_0123456789")] }));
     r = await tango(["inbox", "--config", cfg], {});
     assert.equal(r.code, 2);
-    assert.match(r.stderr, /several agents \(a, b\)/);
+    assert.match(r.stderr, /has 2 agents; pick one with --agent/);
+    assert.ok(!r.stderr.includes("a, b"), "doesn't hand other agents' names to a confused agent");
     r = await tango(["inbox", "--config", cfg, "--agent", "a"], {});
     assert.equal(r.code, 0, r.stderr);
     r = await tango(["inbox", "--config", cfg, "--agent", "b"], {});
     assert.equal(r.code, 1);
     assert.match(r.stderr, /rejected the worker key/);
   } finally {
+    m.close();
+  }
+});
+
+test("tango: a pinned agent can't be switched, even when its env key is gone", async () => {
+  const m = mockTango();
+  const url = await m.listen();
+  const cfg = join(process.env.TANGO_RUNNER_HOME!, "pin-config.json");
+  const agent = (name: string, key: string) => ({ name, key, harness: "command", command: "true", cwd: tmpdir() });
+  writeFileSync(cfg, JSON.stringify({ tango_url: url, agents: [agent("other", "tng_other_0123456789"), agent("me", KEY)] }));
+  try {
+    const pin = { TANGO_RUNNER_AGENT: "me", TANGO_RUNNER_CONFIG: cfg };
+    let r = await tango(["inbox"], pin);
+    assert.equal(r.code, 0, r.stderr);
+    r = await tango(["inbox", "--agent", "other"], pin);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /can only act as it/);
+    r = await tango(["inbox"], { ...pin, TANGO_AGENT: "other" });
+    assert.equal(r.code, 2);
+    r = await tango(["inbox", "--config", cfg], { ...pin, TANGO_WORKER_KEY: KEY, TANGO_URL: url });
+    assert.equal(r.code, 2);
+  } finally {
+    m.close();
+  }
+});
+
+test("tango: --file reads text from a file", async () => {
+  const m = mockTango();
+  const url = await m.listen();
+  const f = join(process.env.TANGO_RUNNER_HOME!, "summary.md");
+  writeFileSync(f, "it's \"quoted\" & $HOME stays `literal`\n");
+  try {
+    const r = await tango(["task", "comment", TASK, "--file", f], { TANGO_WORKER_KEY: KEY, TANGO_URL: url });
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(m.calls.at(-1), { name: "add_comment", args: { task_id: TASK, body: "it's \"quoted\" & $HOME stays `literal`" } });
+  } finally {
+    m.close();
+  }
+});
+
+test("a woken agent whose tool wipes the env still acts as itself", async () => {
+  const m = mockTango();
+  const url = await m.listen();
+  const cfg = join(process.env.TANGO_RUNNER_HOME!, "wake-config.json");
+  const agent = (name: string, key: string, command: string) => ({ name, key, harness: "command", command, cwd: tmpdir() });
+  // `env -i` mimics a harness tool that drops TANGO_WORKER_KEY; only PATH (with the launcher) survives.
+  const command = `env -i PATH="$PATH" tango task comment "\${TANGO_WAKE_KEY#task:}" 'from a scrubbed env'`;
+  writeFileSync(cfg, JSON.stringify({ tango_url: url, agents: [agent("decoy", "tng_decoy_0123456789", "true"), agent("scrubbed", KEY, command)] }));
+  const r = new AgentRunner(
+    { tango_url: url, agents: [] },
+    agent("scrubbed", KEY, command) as never,
+    { debounceMs: 50, waitSeconds: 1, pollSeconds: 0.2, probeSeconds: 3600, configPath: cfg },
+  );
+  const running = r.start();
+  try {
+    m.push({ type: "task.assigned", task_id: TASK, title: "Fix login", summary: "assigned", actor: { kind: "user", id: "u", handle: "@pm", is_self: false } });
+    const t0 = Date.now();
+    while (!m.calls.some((c) => c.name === "add_comment")) {
+      if (Date.now() - t0 > 5000) throw new Error("agent never called tango");
+      await new Promise((res) => setTimeout(res, 50));
+    }
+    // the mock only accepts KEY, so reaching it proves the pinned agent's key was used
+    assert.deepEqual(m.calls.find((c) => c.name === "add_comment")!.args, { task_id: TASK, body: "from a scrubbed env" });
+  } finally {
+    await r.stop(0);
+    await running;
     m.close();
   }
 });

@@ -68,7 +68,9 @@ tango call memory_save content="Deploys need the VPN"   # any tool
 tango tools                                   # what this key can call
 ```
 
-Output is short text by default, since agents pay for every token; add `--json` for Tango's full response. Write `-` in place of any text argument to read it from stdin.
+Output is short text by default, since agents pay for every token; add `--json` for Tango's full response. Quote text with single quotes. For text with quotes, `&` or `$`, pass `--file <path>` (or `-` to read stdin); some agents' shell tools refuse commands containing `&` at all.
+
+Inside a wake, `tango` is pinned to the agent that was woken. Some harnesses run tools with a scrubbed environment, so the launcher itself records which agent it belongs to, and `--agent`, `--config` and `TANGO_AGENT` are refused. A woken agent can't act as another agent from your config.
 
 It talks to Tango's MCP endpoint with the worker key, so it can do exactly what that worker can do and nothing more. New tools work through `tango call` without a release. Outside a wake, it reads the key from the runner config (`--agent <name>` if there are several). To use it in your own shell, run `npm install -g tango-runner` or `npx -p tango-runner tango ...`. Don't use plain `npx tango`: that installs an unrelated package with the same name.
 

@@ -25,12 +25,15 @@ export class AgentRunner {
   private feedAbort = new AbortController();
   /** Kills in-flight agent runs. */
   private runAbort = new AbortController();
+  /** Where this agent's key lives, so `tango` can find it if a harness strips the env. */
+  private configPath?: string;
 
   constructor(
     private cfg: RunnerConfig,
     private agent: AgentConfig,
-    opts: { debounceMs?: number; waitSeconds?: number; pollSeconds?: number; probeSeconds?: number } = {},
+    opts: { debounceMs?: number; waitSeconds?: number; pollSeconds?: number; probeSeconds?: number; configPath?: string } = {},
   ) {
+    this.configPath = opts.configPath;
     this.key = resolveKey(agent);
     this.client = new TangoClient(cfg.tango_url, this.key, { host: hostname(), harness: agent.harness });
     this.sessions = new SessionStore(join(stateDir(), "sessions", `${safe(agent.name)}.json`));
@@ -102,6 +105,7 @@ export class AgentRunner {
       eventsJson: JSON.stringify(events),
       wakeKey: key,
       runDir,
+      configPath: this.configPath,
     });
 
     log("info", a.name, `run #${n} ${key} (${events.length} event${events.length === 1 ? "" : "s"})${sessionId ? " resuming session" : ""} → ${logFile}`);

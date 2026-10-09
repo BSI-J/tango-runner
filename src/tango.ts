@@ -13,6 +13,7 @@ const HELP = `tango ${RUNNER_VERSION}: use Tango from the shell as a worker (age
 Tasks:
   tango inbox                          Your open tasks and unread messages
   tango task show <id>                 A task, its lease and recent activity
+  tango task activity <id>             The task's full activity timeline
   tango task pull                      Lease the next task waiting for you
   tango task claim <id>                Claim a task and take its lease
   tango task note <id> <text>          Add a progress note (needs your lease)
@@ -31,7 +32,9 @@ Any tool:
   tango call <tool> [key=value ...]    Call one; values are parsed as JSON when they can be
   tango call <tool> '{"json": "args"}'
 
-Write "-" for a <text> argument to read it from stdin.
+Text: quote it with single quotes (inside double quotes the shell runs anything in
+backticks or $(...)), or pass --file <path> to read it from a file, or write "-"
+to read it from stdin.
 
 Options:
   --json             Print Tango's full JSON response
@@ -50,23 +53,42 @@ interface Ctx {
 }
 
 function credentials(v: Ctx["v"]): { mcpUrl: string; key: string } {
+  // Inside a wake the runner pins the agent. Never let a woken agent act as another one.
+  const pinned = process.env.TANGO_RUNNER_AGENT;
+  if (pinned) {
+    const want = (v.agent as string | undefined) ?? process.env.TANGO_AGENT;
+    if ((want && want !== pinned) || v.config) {
+      throw new UsageError(`this wake runs as agent "${pinned}" and can only act as it; drop --agent/--config/TANGO_AGENT`);
+    }
+  }
   const envKey = process.env.TANGO_WORKER_KEY;
-  if (envKey && !v.agent && !v.config) {
+  if (envKey && (pinned || (!v.agent && !v.config))) {
     const base = (process.env.TANGO_URL ?? "https://tango.applayer.io").replace(/\/+$/, "");
     return { mcpUrl: process.env.TANGO_MCP_URL ?? `${base}/mcp`, key: envKey };
   }
-  const path = v.config ? expandHome(v.config as string) : defaultConfigPath();
+  const path = pinned
+    ? process.env.TANGO_RUNNER_CONFIG
+    : v.config
+      ? expandHome(v.config as string)
+      : defaultConfigPath();
+  if (!path) throw new Error(`the worker key for "${pinned}" is missing from this environment`);
   const cfg = loadConfig(path);
-  const want = (v.agent as string | undefined) ?? process.env.TANGO_AGENT;
+  const want = pinned ?? (v.agent as string | undefined) ?? process.env.TANGO_AGENT;
   const agent = want ? cfg.agents.find((a) => a.name === want) : cfg.agents.length === 1 ? cfg.agents[0] : undefined;
   if (!agent) {
-    const names = cfg.agents.map((a) => a.name).join(", ");
-    throw new UsageError(want ? `No agent "${want}" in ${path} (have: ${names})` : `${path} has several agents (${names}); pick one with --agent <name>`);
+    if (want) throw new UsageError(`No agent "${want}" in ${path}`);
+    throw new UsageError(`${path} has ${cfg.agents.length} agents; pick one with --agent <name> (see ${path})`);
   }
   return { mcpUrl: cfg.tango_url.replace(/\/+$/, "") + (agent.mcp_path ?? "/mcp"), key: resolveKey(agent) };
 }
 
+let textFile: string | undefined;
+
 function text(parts: string[], what: string): string {
+  if (textFile) {
+    if (parts.length) throw new UsageError(`give the ${what} either inline or with --file, not both`);
+    return readFileSync(textFile, "utf8").trim();
+  }
   if (parts.length === 1 && parts[0] === "-") return readFileSync(0, "utf8").trim();
   const t = parts.join(" ").trim();
   if (!t) throw new UsageError(`missing ${what}`);
@@ -93,10 +115,16 @@ function taskLine(t: Row): string {
 }
 
 function activityLine(e: Row): string {
-  const who = e.actor_handle ?? e.author_handle ?? e.actor ?? e.author ?? "";
-  const what = e.body ?? e.summary ?? e.note ?? e.text ?? e.message ?? "";
-  const kind = e.kind ?? e.type ?? e.event ?? "";
-  return `  ${when(e.created_at)}  ${oneLine(who, 30)} ${oneLine(kind, 30)}${what ? `: ${oneLine(what)}` : ""}`.trimEnd();
+  const h = e.actor_worker_handle ? `@${str(e.actor_worker_handle).replace(/^@/, "")}` : "";
+  const who = h || e.actor_name || e.actor_handle || e.author_handle || "";
+  const kind = e.type ?? e.kind ?? "";
+  const what = e.body ?? e.summary ?? e.text ?? "";
+  return `  ${when(e.at ?? e.created_at)}  ${oneLine(who, 30)} ${oneLine(kind, 30)}${what ? `: ${oneLine(what)}` : ""}`.trimEnd();
+}
+
+/** Oldest first, so the latest entries sit at the bottom next to the prompt. */
+function chronological(entries: Row[]): Row[] {
+  return [...entries].sort((a, b) => str(a.at ?? a.created_at).localeCompare(str(b.at ?? b.created_at)));
 }
 
 function messageLine(m: Row): string {
@@ -143,10 +171,16 @@ async function task(ctx: Ctx, sub: string | undefined, rest: string[]): Promise<
         if (lease) lines.push(`Lease: ${str(lease.worker_handle ?? lease.worker_id)} until ${when(lease.expires_at)}${r.can_write ? " (yours)" : ""}`);
         const arts = Array.isArray(r.artifacts) ? (r.artifacts as Row[]) : [];
         if (arts.length) lines.push(`Artifacts: ${arts.map((a) => str(a.name ?? a.id)).join(", ")}`);
-        const act = Array.isArray(r.activity) ? (r.activity as Row[]).slice(-10) : [];
-        if (act.length) lines.push("Recent activity:", ...act.map(activityLine));
+        const act = Array.isArray(r.activity) ? chronological(r.activity as Row[]).slice(-10) : [];
+        if (act.length) lines.push(`Recent activity (latest ${act.length}; all: tango task activity <id>):`, ...act.map(activityLine));
         return lines.join("\n");
       });
+    }
+    case "activity": {
+      const id = need(rest[0]);
+      const r = await ctx.mcp.call("get_task_activity", { task_id: id, limit: 200 });
+      const act = chronological(rows(r, "activity"));
+      return out(ctx, r, () => (act.length ? act.map(activityLine).join("\n") : "No activity."));
     }
     case "pull": {
       const r = (await ctx.mcp.call("pull_next_task", {})) as Row;
@@ -195,7 +229,7 @@ async function task(ctx: Ctx, sub: string | undefined, rest: string[]): Promise<
       return out(ctx, r, () => `✓ ${id} ${v.done ? "marked done" : "sent for review"}`);
     }
     default:
-      throw new UsageError(sub ? `unknown task command "${sub}"` : "task needs a command: show, pull, claim, note, comment, ask, handoff, done");
+      throw new UsageError(sub ? `unknown task command "${sub}"` : "task needs a command: show, activity, pull, claim, note, comment, ask, handoff, done");
   }
 }
 
@@ -230,6 +264,7 @@ async function main(): Promise<number> {
       all: { type: "boolean" },
       done: { type: "boolean" },
       artifact: { type: "string", multiple: true },
+      file: { type: "string", short: "F" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean" },
     },
@@ -243,6 +278,7 @@ async function main(): Promise<number> {
     process.stdout.write(HELP);
     return cmd || v.help ? 0 : 2;
   }
+  textFile = v.file;
   const { mcpUrl, key } = credentials(v);
   const ctx: Ctx = { mcp: new McpClient(mcpUrl, key), json: Boolean(v.json), v };
 

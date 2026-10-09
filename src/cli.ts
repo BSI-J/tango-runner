@@ -229,7 +229,7 @@ async function start(configPath: string, only?: string): Promise<number> {
     return 1;
   }
   acquireLock(configPath);
-  const runners = agents.map((a) => new AgentRunner(cfg, a));
+  const runners = agents.map((a) => new AgentRunner(cfg, a, { configPath }));
   log("info", "runner", `tango-runner ${RUNNER_VERSION} → ${cfg.tango_url}, ${runners.length} agent(s): ${runners.map((r) => r.name).join(", ")}`);
 
   let stopping = false;
