@@ -1,6 +1,6 @@
 import type { WakeEvent } from "./types.js";
 
-export const RUNNER_VERSION = "0.3.3";
+export const RUNNER_VERSION = "0.4.0";
 
 export class HttpError extends Error {
   constructor(
@@ -17,6 +17,20 @@ export interface WaitResult {
   cursor: string;
   paused?: boolean;
   max_timeout?: number;
+}
+
+/**
+ * A task a person stopped this agent on. Tango sends each one once, in one
+ * heartbeat response, and marks it acknowledged as it does.
+ */
+export type StopTask = { task_id: string; stopped_at?: string } | string;
+
+export interface Heartbeat {
+  ok: boolean;
+  worker_id?: string;
+  unread_messages?: number;
+  reachability_mode?: string;
+  stop_tasks?: StopTask[];
 }
 
 export interface TaskRow {
@@ -78,8 +92,17 @@ export class TangoClient {
     return this.req("POST", "/api/public/workers/wait/ack", { cursor });
   }
 
-  heartbeat(): Promise<{ ok: boolean; worker_id?: string; unread_messages?: number; reachability_mode?: string }> {
-    return this.req("POST", "/api/public/workers/heartbeat", {});
+  /** Sees every heartbeat response, whoever sent the heartbeat (the poll loop or the runner's own). */
+  onHeartbeat?: (hb: Heartbeat) => void;
+
+  async heartbeat(): Promise<Heartbeat> {
+    const hb = await this.req<Heartbeat>("POST", "/api/public/workers/heartbeat", {});
+    try {
+      this.onHeartbeat?.(hb);
+    } catch {
+      // A listener must never break a heartbeat.
+    }
+    return hb;
   }
 
   async listMyTasks(): Promise<TaskRow[]> {

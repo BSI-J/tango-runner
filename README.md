@@ -130,6 +130,7 @@ The key reaches the agent through the environment only, never argv or disk. The 
 - **Paused workers idle.** Pausing the worker in Tango stops wakes. Events queue until you unpause.
 - **Timeouts.** A run is killed after `timeout_minutes` (default 30).
 - **Stopping.** Ctrl-C stops taking new work and gives current runs 60s to finish. Press Ctrl-C again to kill them.
+- **Stop from Tango.** When someone presses **Stop agent** on a task (or calls `request_task_stop`), Tango unassigns the agent and puts the task back in the queue. The runner hears about it on its next heartbeat: every 10s while a run is active, every 60s when idle. It sends the run SIGTERM, then SIGKILL after 10s if it's still going. It discards whatever the run produced and forgets the task's session, so a later reassignment starts fresh. Queued wakes for that task are dropped. The runner reports nothing back for a stopped task, and the log shows `stop received for task …` and how the run ended.
 
 ## Logs and state
 

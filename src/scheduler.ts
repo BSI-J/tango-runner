@@ -60,6 +60,8 @@ export class Scheduler {
   private runStarts: number[] = [];
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
+  /** Keys whose run is being killed by a stop: new events for them are dropped until it ends. */
+  private cancelled = new Set<string>();
   private idleWaiters: Array<() => void> = [];
   private now: () => number;
   private wakeTypes: Set<string>;
@@ -88,6 +90,11 @@ export class Scheduler {
         continue;
       }
       const key = keyFor(e);
+      if (this.cancelled.has(key)) {
+        log("debug", this.o.agentName, `skip ${e.type} ${e.id}: ${key} was stopped`);
+        this.done(id);
+        continue;
+      }
       const p = this.pending.get(key) ?? { events: [], duringRun: false, readyAt: this.now() + this.o.debounceMs };
       p.events.push(e);
       if (this.active.has(key)) p.duringRun = true;
@@ -100,6 +107,23 @@ export class Scheduler {
   idle(): Promise<void> {
     if (this.active.size === 0 && this.pending.size === 0) return Promise.resolve();
     return new Promise((r) => this.idleWaiters.push(r));
+  }
+
+  /**
+   * A person stopped this agent on `key`: drop its queued wakes (including a
+   * follow-up waiting for the current run) and ignore new ones until the
+   * current run, if any, has ended. Returns whether anything was dropped.
+   */
+  cancel(key: string): boolean {
+    const p = this.pending.get(key);
+    if (p) {
+      this.pending.delete(key);
+      for (const e of p.events) this.done(e.synthetic ? null : parseId(e.id));
+    }
+    this.streak.delete(key);
+    if (this.active.has(key)) this.cancelled.add(key);
+    this.pump();
+    return Boolean(p);
   }
 
   stop(): void {
@@ -162,6 +186,7 @@ export class Scheduler {
       .catch((err: unknown) => log("error", this.o.agentName, `${key}: run failed: ${(err as Error).message}`))
       .finally(() => {
         this.active.delete(key);
+        this.cancelled.delete(key);
         for (const e of events) this.done(e.synthetic ? null : parseId(e.id));
         this.pump();
       });

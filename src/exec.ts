@@ -7,6 +7,8 @@ export interface ExecResult {
   exitCode: number | null;
   timedOut: boolean;
   stdout: string;
+  /** It ignored SIGTERM and had to be SIGKILLed. */
+  forceKilled: boolean;
 }
 
 const MAX_CAPTURE = 2 * 1024 * 1024;
@@ -18,7 +20,7 @@ const MAX_CAPTURE = 2 * 1024 * 1024;
  */
 export function execRun(
   spec: SpawnSpec,
-  opts: { cwd: string; logFile: string; timeoutMs: number; signal?: AbortSignal },
+  opts: { cwd: string; logFile: string; timeoutMs: number; signal?: AbortSignal; killGraceMs?: number },
 ): Promise<ExecResult> {
   mkdirSync(join(opts.logFile, ".."), { recursive: true });
   const log = createWriteStream(opts.logFile, { flags: "a", mode: 0o600 });
@@ -39,6 +41,7 @@ export function execRun(
     let stdout = "";
     let timedOut = false;
     let settled = false;
+    let forceKilled = false;
 
     const kill = () => {
       if (child.exitCode !== null || child.pid === undefined) return;
@@ -49,13 +52,15 @@ export function execRun(
       }
       setTimeout(() => {
         if (child.exitCode === null && child.pid !== undefined) {
+          forceKilled = true;
+          log.write("\n# still running after SIGTERM, sending SIGKILL\n");
           try {
             process.kill(process.platform === "win32" ? child.pid : -child.pid, "SIGKILL");
           } catch {
             child.kill("SIGKILL");
           }
         }
-      }, 10_000).unref();
+      }, opts.killGraceMs ?? 10_000).unref();
     };
 
     const timer = setTimeout(() => {
@@ -64,7 +69,8 @@ export function execRun(
       kill();
     }, opts.timeoutMs);
     const onAbort = () => {
-      log.write("\n# runner stopping, killing run\n");
+      const why = opts.signal?.reason;
+      log.write(`\n# ${typeof why === "string" ? why : "runner stopping"}, killing run\n`);
       kill();
     };
     opts.signal?.addEventListener("abort", onAbort, { once: true });
@@ -84,7 +90,7 @@ export function execRun(
       clearTimeout(timer);
       opts.signal?.removeEventListener("abort", onAbort);
       log.end(`\n# exit ${code}${timedOut ? " (timeout)" : ""}\n`);
-      resolve({ exitCode: code, timedOut, stdout });
+      resolve({ exitCode: code, timedOut, stdout, forceKilled });
     };
     child.on("error", (err) => {
       log.write(`\n# failed to start: ${err.message}\n`);

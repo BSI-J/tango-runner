@@ -269,8 +269,14 @@ async function doctor(configPath: string): Promise<number> {
     const client = new TangoClient(cfg.tango_url, key, { host: "doctor", harness: a.harness });
     let keyOk = true;
     try {
-      const hb = await client.heartbeat();
-      process.stdout.write(`  ✓ key ${redact(key)} works (worker ${hb.worker_id ?? "?"})\n`);
+      if (holder) {
+        // A heartbeat would take any pending stop_tasks (Tango sends each once) away from the running runner.
+        await client.listMyTasks();
+        process.stdout.write(`  ✓ key ${redact(key)} works\n`);
+      } else {
+        const hb = await client.heartbeat();
+        process.stdout.write(`  ✓ key ${redact(key)} works (worker ${hb.worker_id ?? "?"})\n`);
+      }
     } catch (e) {
       ok = keyOk = false;
       process.stdout.write(`  ✗ key ${redact(key)}: ${(e as Error).message}\n`);
