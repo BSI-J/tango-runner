@@ -1,6 +1,6 @@
 import type { WakeEvent } from "./types.js";
 
-export const RUNNER_VERSION = "0.4.0";
+export const RUNNER_VERSION = "0.4.1";
 
 export class HttpError extends Error {
   constructor(
@@ -62,15 +62,28 @@ export class TangoClient {
   }
 
   private async req<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
-    // redirect: "manual" — *.lovable.app hosts 302 and drop Authorization on redirect.
-    const res = await fetch(this.baseUrl + path, {
-      method,
-      headers: this.headers(),
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal,
-      redirect: "manual",
-    });
-    const text = await res.text();
+    // fetch leaves its abort listener on the signal it's given until the request is
+    // garbage-collected, so the runner's long-lived shutdown signal collected one per
+    // long-poll. Give fetch a per-request signal and unlink it when the request ends.
+    const own = new AbortController();
+    const forward = () => own.abort(signal?.reason);
+    if (signal?.aborted) forward();
+    else signal?.addEventListener("abort", forward, { once: true });
+    let res: Response;
+    let text: string;
+    try {
+      // redirect: "manual" — *.lovable.app hosts 302 and drop Authorization on redirect.
+      res = await fetch(this.baseUrl + path, {
+        method,
+        headers: this.headers(),
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: own.signal,
+        redirect: "manual",
+      });
+      text = await res.text();
+    } finally {
+      signal?.removeEventListener("abort", forward);
+    }
     if (res.status >= 300 && res.status < 400) {
       throw new HttpError(res.status, `redirected to ${res.headers.get("location")}; use the canonical Tango URL`);
     }

@@ -5,7 +5,7 @@ import { buildSpawn, parseOutput } from "./adapters/index.js";
 import { type Heartbeat, TangoClient } from "./client.js";
 import { expandHome, resolveKey, stateDir } from "./config.js";
 import { execRun } from "./exec.js";
-import { Feed } from "./feed.js";
+import { abortableSleep, Feed } from "./feed.js";
 import { log } from "./log.js";
 import { buildPrompt, rulesFor } from "./prompt.js";
 import { Scheduler } from "./scheduler.js";
@@ -95,10 +95,7 @@ export class AgentRunner {
   private async heartbeatLoop(signal: AbortSignal): Promise<void> {
     while (!signal.aborted) {
       const ms = this.runs.size > 0 ? this.heartbeatMs.active : this.heartbeatMs.idle;
-      await new Promise<void>((r) => {
-        const t = setTimeout(r, ms);
-        signal.addEventListener("abort", () => (clearTimeout(t), r()), { once: true });
-      });
+      await abortableSleep(ms, signal); // removes its abort listener each time; a bare one leaked per heartbeat
       if (signal.aborted) break;
       // In poll mode the feed already heartbeats on every poll.
       if (this.feed.mode === "poll" && this.runs.size === 0) continue;

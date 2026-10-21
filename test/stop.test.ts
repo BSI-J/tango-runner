@@ -3,6 +3,7 @@
 // mock Tango.
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { getEventListeners } from "node:events";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -266,6 +267,26 @@ test("a stop before a queued wake starts means it never runs", { skip: !posix },
     assert.ok(!existsSync(`${out}.ran`));
   } finally {
     logs.restore();
+    await r.stop(0);
+    await running;
+    m.close();
+  }
+});
+
+test("heartbeats don't pile up abort listeners on the shutdown signal", async () => {
+  const m = mockTango();
+  const url = await m.listen();
+  // Many heartbeat cycles in a short time; before the fix each one left a listener behind.
+  const r = runner(url, "listeners", { command: "true" }, { heartbeatSeconds: { active: 0.005, idle: 0.005 } });
+  const running = r.start();
+  try {
+    await until(() => m.heartbeats >= 100, 10_000, "100 heartbeats");
+    // ...and the wake long-polls, which pass the same signal to fetch.
+    await until(() => m.paths.filter((p) => p === "/api/public/workers/wait").length >= 20, 15_000, "20 long-polls");
+    const signal = (r as unknown as { feedAbort: AbortController }).feedAbort.signal;
+    const n = getEventListeners(signal, "abort").length;
+    assert.ok(n <= 5, `${n} abort listeners after ${m.heartbeats} heartbeats and ${m.paths.filter((p) => p.endsWith("/wait")).length} long-polls`);
+  } finally {
     await r.stop(0);
     await running;
     m.close();
