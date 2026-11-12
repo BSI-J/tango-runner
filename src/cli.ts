@@ -6,6 +6,7 @@ import { parseArgs } from "node:util";
 import { AgentRunner } from "./agent.js";
 import { HttpError, RUNNER_VERSION, TangoClient } from "./client.js";
 import { readStatus, StatusWriter } from "./status.js";
+import { installService, restartService, serviceLogPath, serviceState, startService, stopService, uninstallService } from "./service.js";
 import { DEFAULT_URL, defaultConfigPath, expandHome, loadConfig, resolveKey, saveConfig, validateConfig } from "./config.js";
 import { acquireLock, lockHolder } from "./lock.js";
 import { log, redact, setVerbose } from "./log.js";
@@ -31,18 +32,27 @@ import type { AgentConfig, Harness, RunnerConfig } from "./types.js";
 const HELP = `tango-runner ${RUNNER_VERSION}: wake your local agents the moment Tango has work for them.
 
 Usage:
-  tango-runner setup --code ABCD-2345 [--url <url>] [--yes] [--no-start]
+  tango-runner setup --code ABCD-2345 [--url <url>] [--yes] [--service | --foreground | --no-start]
   tango-runner init --key tng_... --harness claude|codex|command --cwd <dir> [options]
   tango-runner start [--agent <name>] [--verbose]
   tango-runner doctor
   tango-runner status [--json]
+  tango-runner service install|uninstall|start|stop|restart|status [--replace] [--json]
   tango-runner help
 
 setup: detects installed agent CLIs (claude, codex, cursor-agent, gemini, opencode,
 hermes), creates them as agents in Tango with the one-time code from the Connect
-agents page, saves their keys to the config, then runs doctor and start.
+agents page, saves their keys to the config, runs doctor, then starts the runner:
+as a background login service (asked, or the default with --yes), or in this terminal.
   --yes                 Use every detected program and the current folder; ask nothing.
+  --service             Start it as a background login service (no question).
+  --foreground          Run it in this terminal instead (Ctrl-C stops it).
   --no-start            Stop after doctor.
+
+service: keep the runner running in the background and start it at login
+(macOS launchd, Windows logon task, Linux systemd user unit). install also
+repairs an existing service; --replace stops a runner already running for this
+config in a terminal first. Output goes to ~/.tango-runner/logs/runner.log.
 
 status: is a runner running for this config and talking to Tango? Reads
 ~/.tango-runner/status.json, which a running runner refreshes at least every 30s.
@@ -83,6 +93,9 @@ async function main(): Promise<number> {
       verbose: { type: "boolean", short: "v" },
       help: { type: "boolean", short: "h" },
       json: { type: "boolean" },
+      service: { type: "boolean" },
+      foreground: { type: "boolean" },
+      replace: { type: "boolean" },
     },
   });
   if (values.verbose) setVerbose(true);
@@ -100,6 +113,8 @@ async function main(): Promise<number> {
       return doctor(configPath);
     case "status":
       return statusCmd(configPath, !!values.json);
+    case "service":
+      return serviceCmd(configPath, positionals[1], values);
     default:
       process.stdout.write(HELP);
       return cmd === "help" ? 0 : 1;
@@ -227,13 +242,82 @@ async function setup(configPath: string, v: Record<string, string | boolean | un
     process.stdout.write("\nDone. Start the runner with: tango-runner start\n");
     return 0;
   }
+  // A background service already runs this config: restart it to load the new agents.
+  const svc = await serviceState(configPath).catch(() => undefined);
+  if (svc?.installed) {
+    await restartService(configPath);
+    process.stdout.write("\nRestarted the background runner to pick up the new agents. Check it with: tango-runner status\n");
+    return 0;
+  }
   const holder = lockHolder(configPath);
   if (holder) {
-    process.stdout.write(`\nA runner is already running for this config (pid ${holder}). Restart it to pick up the new agents.\n`);
+    process.stdout.write(`\nA runner is already running for this config (pid ${holder}). Restart it to pick up the new agents,\nor move it to a background service with: tango-runner service install --replace\n`);
+    return 0;
+  }
+  const background = v.foreground ? false : v.service || v.yes ? true : process.stdin.isTTY ? await askYes("\nKeep the runner running in the background and start it at login? [Y/n] ") : false;
+  if (background) {
+    try {
+      await installService(configPath);
+    } catch (e) {
+      process.stderr.write(`\nCould not install the background service: ${(e as Error).message}\nStarting in this terminal instead (Ctrl-C to stop)…\n`);
+      return start(configPath);
+    }
+    process.stdout.write(`\nThe runner now runs in the background and starts at login.\n  Check it:  tango-runner status\n  Log:       ${serviceLogPath()}\n  Remove:    tango-runner service uninstall\n`);
     return 0;
   }
   process.stdout.write("\nStarting the runner (Ctrl-C to stop)…\n");
   return start(configPath);
+}
+
+async function askYes(question: string): Promise<boolean> {
+  const { createInterface } = await import("node:readline");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer: string = await new Promise((r) => rl.question(question, r));
+  rl.close();
+  return !/^\s*n/i.test(answer);
+}
+
+async function serviceCmd(configPath: string, sub: string | undefined, v: Record<string, string | boolean | undefined>): Promise<number> {
+  const out = (st: Awaited<ReturnType<typeof serviceState>>, msg?: string) => {
+    if (v.json) process.stdout.write(JSON.stringify({ ...st, lockPid: lockHolder(configPath) ?? null, message: msg ?? null }, null, 2) + "\n");
+    else {
+      if (msg) process.stdout.write(msg + "\n");
+      process.stdout.write(`service ${st.name}: ${st.installed ? "installed" : "not installed"}, ${st.running ? `running (pid ${st.pid})` : "not running"}\n`);
+    }
+  };
+  try {
+    switch (sub) {
+      case "install":
+        if (!existsSync(configPath)) throw new Error(`No config at ${configPath}. Run setup first.`);
+        out(await installService(configPath, { replace: !!v.replace }), `Installed. Log: ${serviceLogPath()}`);
+        return 0;
+      case "uninstall":
+        out(await uninstallService(configPath), "Removed from login and stopped.");
+        return 0;
+      case "start":
+        out(await startService(configPath));
+        return 0;
+      case "stop":
+        out(await stopService(configPath), "Stopped until the next login (still installed).");
+        return 0;
+      case "restart":
+        out(await restartService(configPath));
+        return 0;
+      case "status":
+      case undefined: {
+        const st = await serviceState(configPath);
+        out(st);
+        return st.running ? 0 : 1;
+      }
+      default:
+        process.stderr.write(`Unknown service command "${sub}". Use install, uninstall, start, stop, restart or status.\n`);
+        return 1;
+    }
+  } catch (e) {
+    if (v.json) process.stdout.write(JSON.stringify({ error: (e as Error).message }) + "\n");
+    else process.stderr.write(`service ${sub}: ${(e as Error).message}\n`);
+    return 1;
+  }
 }
 
 async function start(configPath: string, only?: string): Promise<number> {

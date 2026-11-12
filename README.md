@@ -26,11 +26,13 @@ npx tango-runner@latest setup --code ABCD-2345
 2. **Choose.** Every program it found starts ticked. Untick any you don't want, then pick a working folder for each one. The default is the current folder.
 3. **Create.** It sends Tango the program names, their versions and this computer's hostname. Tango creates one agent per program and returns a worker key for each. The code works once and expires after 10 minutes.
 4. **Save.** It adds the agents to `~/.tango-runner/config.json` (mode 600), keeping any agents already in that file. Claude Code uses the `claude` harness and Codex uses `codex`. Every other program runs as a `command` harness with the prompt on stdin: hermes as `hermes chat --query-file - --oneshot`, opencode as `opencode run --standalone --auto` (it uses OpenCode's default model, so set one that works), cursor-agent as `cursor-agent -p --trust --force`, agy as `agy --dangerously-skip-permissions -p "$(cat)"` (agy takes the prompt as an argument, not on stdin), gemini as `gemini --skip-trust --approval-mode yolo -p …`, and the rest by name. Tango sets up at most 6 agents per code; with `--yes`, `setup` takes the first 6 it finds.
-5. **Check and run.** It runs `doctor`, then `start`.
+5. **Check and run.** It runs `doctor`, then asks whether to keep the runner running in the background and start it at login (the default). Say no to run it in the terminal instead. If the background service is already installed, it restarts it to pick up the new agents.
 
 | Option | |
 |---|---|
-| `--yes` | Use every program it found and the current folder, without asking. |
+| `--yes` | Use every program it found and the current folder, and install the background service, without asking. |
+| `--service` | Install the background service without asking. |
+| `--foreground` | Run in this terminal instead of the background (Ctrl-C stops it). |
 | `--no-start` | Stop after `doctor`. |
 | `--url <url>` | Tango URL (default `https://tango.applayer.io`). |
 
@@ -142,24 +144,27 @@ The key reaches the agent through the environment only, never argv or disk. The 
 
 ## Running it permanently
 
-The easiest way is Applayer Desktop: it bundles the runner, installs it as a login service (launchd, a Windows logon task, or a systemd user unit), restarts it if it stops, and shows whether each agent is talking to Tango. To do it by hand:
+Run it as a background service that starts at login and restarts if it stops:
 
-To keep it running under macOS launchd, create `~/Library/LaunchAgents/io.applayer.tango-runner.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>io.applayer.tango-runner</string>
-  <key>ProgramArguments</key><array><string>/usr/local/bin/npx</string><string>tango-runner@latest</string><string>start</string></array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/tango-runner.log</string>
-  <key>StandardErrorPath</key><string>/tmp/tango-runner.log</string>
-</dict></plist>
+```bash
+npx tango-runner@latest service install
 ```
 
-Then load it with `launchctl load ~/Library/LaunchAgents/io.applayer.tango-runner.plist`. On Linux, use a systemd user unit with `ExecStart=npx tango-runner@latest start` and `Restart=always`.
+`setup` offers this at the end (it's the default with `--yes`). It uses launchd on macOS, a logon task on Windows, and a systemd user unit on Linux. The runner's files are copied to `~/.tango-runner/app/<version>/` so the service doesn't depend on the npx cache, it runs on the Node that installed it, and it gets your login shell's PATH so woken agents can find `claude`, `codex`, `hermes` and the rest. Output goes to `~/.tango-runner/logs/runner.log`.
+
+| Command | What it does |
+| --- | --- |
+| `tango-runner service install` | Install (or repair) and start. Add `--replace` to stop a runner already running in a terminal first. |
+| `tango-runner service status` | Installed? Running? Exits 0 when running. `--json` for scripts. |
+| `tango-runner service restart` | Restart, for example after adding agents. `setup` does this for you. |
+| `tango-runner service stop` | Stop until the next login. |
+| `tango-runner service uninstall` | Stop and remove it from login. |
+
+`tango-runner status` goes further: it reads `status.json` and shows whether each agent is actually reaching Tango.
+
+After upgrading the runner, run `service install` again so the service points at the new version. If you remove the Node version that installed the service (for example with nvm), do the same.
+
+Tango Desktop bundles the runner and manages this service for you, with a status screen and a menu-bar icon.
 
 ## Server contract
 
