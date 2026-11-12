@@ -10,6 +10,7 @@ import { log } from "./log.js";
 import { buildPrompt, rulesFor } from "./prompt.js";
 import { Scheduler } from "./scheduler.js";
 import { SessionStore } from "./state.js";
+import type { StatusWriter } from "./status.js";
 import type { AgentConfig, RunnerConfig, WakeEvent } from "./types.js";
 
 /** One configured agent: its feed, its scheduler, and how it runs. */
@@ -31,6 +32,7 @@ export class AgentRunner {
   private runs = new Map<string, { n: number; abort: AbortController; stopped: boolean }>();
   private heartbeatMs: { active: number; idle: number };
   private killGraceMs?: number;
+  private status?: StatusWriter;
 
   constructor(
     private cfg: RunnerConfig,
@@ -45,6 +47,8 @@ export class AgentRunner {
       heartbeatSeconds?: { active: number; idle: number };
       /** SIGTERM → SIGKILL grace for a killed run. Default 10s. */
       killGraceMs?: number;
+      /** Where to report liveness and runs (status.json). */
+      status?: StatusWriter;
     } = {},
   ) {
     this.configPath = opts.configPath;
@@ -56,6 +60,11 @@ export class AgentRunner {
     this.key = resolveKey(agent);
     this.client = new TangoClient(cfg.tango_url, this.key, { host: hostname(), harness: agent.harness });
     this.client.onHeartbeat = (hb) => this.onHeartbeat(hb);
+    this.status = opts.status;
+    this.client.onContact = (ok, error) => {
+      this.status?.contact(agent.name, ok, error);
+      if (this.feed) this.status?.mode(agent.name, this.feed.mode);
+    };
     this.sessions = new SessionStore(join(stateDir(), "sessions", `${safe(agent.name)}.json`));
     this.scheduler = new Scheduler({
       agentName: agent.name,
@@ -186,6 +195,7 @@ export class AgentRunner {
     if (this.runAbort.signal.aborted) onShutdown();
     else this.runAbort.signal.addEventListener("abort", onShutdown, { once: true });
     this.runs.set(key, run);
+    this.status?.runStarted(a.name, key);
     let res;
     try {
       res = await execRun(spec, {
@@ -198,6 +208,7 @@ export class AgentRunner {
     } finally {
       this.runs.delete(key);
       this.runAbort.signal.removeEventListener("abort", onShutdown);
+      if (res === undefined) this.status?.runEnded(a.name, key, "error");
     }
     const secs = Math.round((Date.now() - t0) / 1000);
 
@@ -206,6 +217,7 @@ export class AgentRunner {
       this.sessions.delete(key);
       const how = res.forceKilled ? "force-killed after ignoring SIGTERM" : res.exitCode === null ? "terminated" : `ended (exit ${res.exitCode})`;
       log("info", a.name, `run #${n} ${key} stopped in Tango: ${how} after ${secs}s; result discarded`);
+      this.status?.runEnded(a.name, key, "stopped in Tango");
       return;
     }
     const out = parseOutput(a, res.stdout);
@@ -216,6 +228,7 @@ export class AgentRunner {
     }
     const status = res.timedOut ? "timed out" : res.exitCode === 0 ? "done" : `exit ${res.exitCode}`;
     log(res.exitCode === 0 ? "info" : "warn", a.name, `run #${n} ${key} ${status} in ${secs}s${out.summary ? `: ${oneLine(out.summary)}` : ""}`);
+    this.status?.runEnded(a.name, key, status);
   }
 }
 

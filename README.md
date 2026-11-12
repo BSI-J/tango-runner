@@ -137,8 +137,12 @@ The key reaches the agent through the environment only, never argv or disk. The 
 - `~/.tango-runner/logs/<agent>/<time>-<task>.log`: the full output of each run.
 - `~/.tango-runner/sessions/<agent>.json`: task/thread → harness session id (for resume).
 - Set `-v` or `TANGO_RUNNER_DEBUG=1` for verbose logs.
+- `~/.tango-runner/status.json`: a live snapshot for supervisors — runner pid, version and state, and per agent the last successful contact with Tango, the last error, active runs and the last run's result. Rewritten at least every 30 seconds while the runner runs; treat it as stale after 2 minutes. It never contains keys.
+- `tango-runner status` prints that snapshot (`--json` for scripts) and exits 0 only when a runner is running and fresh.
 
 ## Running it permanently
+
+The easiest way is [Applayer Desktop](https://github.com/BSI-J/applayer-desktop): it bundles the runner, installs it as a login service (launchd, a Windows logon task, or a systemd user unit), restarts it if it stops, and shows whether each agent is talking to Tango. To do it by hand:
 
 To keep it running under macOS launchd, create `~/Library/LaunchAgents/io.applayer.tango-runner.plist`:
 

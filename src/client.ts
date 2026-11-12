@@ -1,6 +1,6 @@
 import type { WakeEvent } from "./types.js";
 
-export const RUNNER_VERSION = "0.4.1";
+export const RUNNER_VERSION = "0.5.0";
 
 export class HttpError extends Error {
   constructor(
@@ -81,17 +81,37 @@ export class TangoClient {
         redirect: "manual",
       });
       text = await res.text();
+    } catch (err) {
+      // A shutdown abort isn't a failure to reach Tango.
+      if (!own.signal.aborted) this.reportContact(false, (err as Error).message);
+      throw err;
     } finally {
       signal?.removeEventListener("abort", forward);
     }
     if (res.status >= 300 && res.status < 400) {
-      throw new HttpError(res.status, `redirected to ${res.headers.get("location")}; use the canonical Tango URL`);
+      const e = new HttpError(res.status, `redirected to ${res.headers.get("location")}; use the canonical Tango URL`);
+      this.reportContact(false, e.message);
+      throw e;
     }
     if (!res.ok) {
       const ra = Number(res.headers.get("retry-after"));
-      throw new HttpError(res.status, text, Number.isFinite(ra) && ra > 0 ? ra * 1000 : undefined);
+      const e = new HttpError(res.status, text, Number.isFinite(ra) && ra > 0 ? ra * 1000 : undefined);
+      this.reportContact(false, `HTTP ${res.status}`);
+      throw e;
     }
+    this.reportContact(true);
     return (text ? JSON.parse(text) : {}) as T;
+  }
+
+  /** Sees the outcome of every request (for status reporting). Must not throw. */
+  onContact?: (ok: boolean, error?: string) => void;
+
+  private reportContact(ok: boolean, error?: string): void {
+    try {
+      this.onContact?.(ok, error);
+    } catch {
+      // A listener must never break a request.
+    }
   }
 
   /** Long-poll for wake events. Throws HttpError(404) when the server predates /wait. */

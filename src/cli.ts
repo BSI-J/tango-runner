@@ -5,6 +5,7 @@ import { hostname } from "node:os";
 import { parseArgs } from "node:util";
 import { AgentRunner } from "./agent.js";
 import { HttpError, RUNNER_VERSION, TangoClient } from "./client.js";
+import { readStatus, StatusWriter } from "./status.js";
 import { DEFAULT_URL, defaultConfigPath, expandHome, loadConfig, resolveKey, saveConfig, validateConfig } from "./config.js";
 import { acquireLock, lockHolder } from "./lock.js";
 import { log, redact, setVerbose } from "./log.js";
@@ -34,6 +35,7 @@ Usage:
   tango-runner init --key tng_... --harness claude|codex|command --cwd <dir> [options]
   tango-runner start [--agent <name>] [--verbose]
   tango-runner doctor
+  tango-runner status [--json]
   tango-runner help
 
 setup: detects installed agent CLIs (claude, codex, cursor-agent, gemini, opencode,
@@ -41,6 +43,10 @@ hermes), creates them as agents in Tango with the one-time code from the Connect
 agents page, saves their keys to the config, then runs doctor and start.
   --yes                 Use every detected program and the current folder; ask nothing.
   --no-start            Stop after doctor.
+
+status: is a runner running for this config and talking to Tango? Reads
+~/.tango-runner/status.json, which a running runner refreshes at least every 30s.
+Exits 0 only when it is running and fresh.
 
 init options:
   --name <label>        Agent label (default: harness name). Re-running init with the same name replaces it.
@@ -76,6 +82,7 @@ async function main(): Promise<number> {
       agent: { type: "string" },
       verbose: { type: "boolean", short: "v" },
       help: { type: "boolean", short: "h" },
+      json: { type: "boolean" },
     },
   });
   if (values.verbose) setVerbose(true);
@@ -91,6 +98,8 @@ async function main(): Promise<number> {
       return start(configPath, values.agent);
     case "doctor":
       return doctor(configPath);
+    case "status":
+      return statusCmd(configPath, !!values.json);
     default:
       process.stdout.write(HELP);
       return cmd === "help" ? 0 : 1;
@@ -235,7 +244,14 @@ async function start(configPath: string, only?: string): Promise<number> {
     return 1;
   }
   acquireLock(configPath);
-  const runners = agents.map((a) => new AgentRunner(cfg, a, { configPath }));
+  const status = new StatusWriter({
+    version: RUNNER_VERSION,
+    config: configPath,
+    tangoUrl: cfg.tango_url,
+    agents: agents.map((a) => ({ name: a.name, harness: a.harness })),
+  });
+  status.start();
+  const runners = agents.map((a) => new AgentRunner(cfg, a, { configPath, status }));
   log("info", "runner", `tango-runner ${RUNNER_VERSION} → ${cfg.tango_url}, ${runners.length} agent(s): ${runners.map((r) => r.name).join(", ")}`);
 
   let stopping = false;
@@ -243,11 +259,14 @@ async function start(configPath: string, only?: string): Promise<number> {
     if (stopping) {
       log("warn", "runner", `${sig} again: killing runs now`);
       await Promise.all(runners.map((r) => r.stop(0)));
+      status.setState("stopped");
       process.exit(130);
     }
     stopping = true;
+    status.setState("stopping");
     log("info", "runner", `${sig}: no new runs; waiting up to 60s for current runs (Ctrl-C again to kill)`);
     await Promise.all(runners.map((r) => r.stop(60_000)));
+    status.setState("stopped");
     process.exit(0);
   };
   process.on("SIGINT", () => void shutdown("SIGINT"));
@@ -255,6 +274,30 @@ async function start(configPath: string, only?: string): Promise<number> {
 
   await Promise.all(runners.map((r) => r.start()));
   return 0;
+}
+
+/**
+ * Is a runner running for this config, and is it talking to Tango? Exit 0 only
+ * when the lock holder is alive and status.json is fresh. `--json` for scripts.
+ */
+function statusCmd(configPath: string, json: boolean): number {
+  const holder = lockHolder(configPath);
+  const st = readStatus();
+  const ageMs = st ? Date.now() - Date.parse(st.updated_at) : Infinity;
+  const fresh = !!st && st.state === "running" && ageMs < 120_000 && (!holder || st.pid === holder);
+  const running = !!holder && fresh;
+  if (json) {
+    process.stdout.write(JSON.stringify({ running, pid: holder ?? null, stale: !!st && !fresh, status: st ?? null }, null, 2) + "\n");
+    return running ? 0 : 1;
+  }
+  if (!holder) process.stdout.write("runner: not running\n");
+  else process.stdout.write(`runner: running (pid ${holder})${st ? ` · ${st.version}` : ""}${fresh ? "" : " · status is stale (an older runner, or stuck)"}\n`);
+  for (const a of st?.agents ?? []) {
+    const seen = a.last_contact_at ? `${Math.round((Date.now() - Date.parse(a.last_contact_at)) / 1000)}s ago` : "never";
+    const run = a.last_run ? ` · last run ${a.last_run.result ?? "running"} (${a.last_run.started_at})` : "";
+    process.stdout.write(`  ${a.name} (${a.harness}, ${a.mode}): Tango contact ${seen}${a.active_runs ? ` · ${a.active_runs} running` : ""}${run}${a.last_error && a.last_error_at && (!a.last_contact_at || a.last_error_at > a.last_contact_at) ? ` · last error: ${a.last_error}` : ""}\n`);
+  }
+  return running ? 0 : 1;
 }
 
 async function doctor(configPath: string): Promise<number> {
