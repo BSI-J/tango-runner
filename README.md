@@ -142,7 +142,7 @@ The key reaches the agent through the environment only, never argv or disk. The 
 
 ## Running it permanently
 
-The easiest way is [Applayer Desktop](https://github.com/BSI-J/applayer-desktop): it bundles the runner, installs it as a login service (launchd, a Windows logon task, or a systemd user unit), restarts it if it stops, and shows whether each agent is talking to Tango. To do it by hand:
+The easiest way is Applayer Desktop: it bundles the runner, installs it as a login service (launchd, a Windows logon task, or a systemd user unit), restarts it if it stops, and shows whether each agent is talking to Tango. To do it by hand:
 
 To keep it running under macOS launchd, create `~/Library/LaunchAgents/io.applayer.tango-runner.plist`:
 
